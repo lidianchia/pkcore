@@ -63,8 +63,9 @@ docker run --rm -v "$PWD":/work -w /work \
 - **`ka` equal to `k` (one compartment).** mrgsolve `$PKMODEL` refuses this case ("k10 is
   too close to ka"); the scenario declares that error.
 - **`ka` equal to the slow disposition rate (two compartments).** Neither closed form
-  handles this case: rxode2 `linCmt()` deviates by up to 30 % and mrgsolve `$PKMODEL` by up
-  to 50 %. Both ODE paths agree with pkcore to about 1e-10. pkcore's values for nearly equal
+  handles this case: rxode2 `linCmt()` deviates by up to about 30 % and mrgsolve `$PKMODEL`
+  by up to about 56 %, and mrgsolve's values there even differ between platforms. Both ODE
+  paths agree with pkcore to about 1e-10. pkcore's values for nearly equal
   rates are also verified against decimal arithmetic in `tests/test_near_equal_rates.py`.
   The scenario records these as `known_engine_issues`, and the test checks that the
   deviation is still present, so the documentation stays true.
