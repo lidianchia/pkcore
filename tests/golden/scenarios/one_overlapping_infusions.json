@@ -1,0 +1,42 @@
+{
+  "name": "one_overlapping_infusions",
+  "description": "one-compartment: two overlapping infusions",
+  "model": {
+    "compartments": 1,
+    "cl": 2.0,
+    "v": 20.0,
+    "ka": 1.3,
+    "f": 1.0,
+    "tlag": 0.0
+  },
+  "doses": [
+    {
+      "time": 0.0,
+      "amount": 120.0,
+      "route": "iv_infusion",
+      "duration": 6.0
+    },
+    {
+      "time": 3.0,
+      "amount": 60.0,
+      "route": "iv_infusion",
+      "duration": 2.0
+    }
+  ],
+  "observations": {
+    "times": [
+      0.0,
+      1.0,
+      3.0,
+      4.0,
+      5.0,
+      5.5,
+      6.0,
+      7.0,
+      9.0,
+      12.0,
+      24.0
+    ],
+    "order": "dose_first"
+  }
+}

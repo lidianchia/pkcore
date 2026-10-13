@@ -2,8 +2,8 @@
 
 This document states exactly what pkcore v0.1 computes. The conventions, metrics and
 numerical methods below are exercised by the test suite (see [Verification](#verification));
-the units table, the steady-state guidance and the notes on other engines are definitions or
-advice and are not tested.
+the units table and the steady-state guidance are definitions or advice and are not tested,
+and of the notes on other engines only the rxode2 and mrgsolve behaviour is tested.
 
 ## Units
 
@@ -105,7 +105,15 @@ the duration. They also support steady-state records. Engines that process event
 order (NONMEM does) decide by the order of the records whether an observation at a dose time
 is pre- or post-dose. Check these settings before comparing pkcore with another engine:
 pkcore always reports the post-dose value from `concentration` and the pre-dose value from
-`trough`. Cross-engine comparisons are planned as a separate, documented test set.
+`trough`.
+
+The cross-engine golden tests (`tests/golden`) pin down the behaviour of rxode2 5.1.7.1 and
+mrgsolve 2.0.1 for the cases pkcore supports. At a time with both a dose and an observation,
+rxode2 reports the post-dose value whatever the record order, and mrgsolve follows the record
+order. Bioavailability and lag times defined on the depot only behave as in pkcore. Their
+closed forms (rxode2 `linCmt()`, mrgsolve `$PKMODEL`) fail when `ka` equals a disposition
+rate: mrgsolve refuses `ka == k` for one compartment, and both deviate by tens of percent
+when `ka` equals the slow rate of two compartments, while their ODE paths agree with pkcore.
 
 ## Metrics
 
@@ -230,7 +238,9 @@ relative precision.
 
 ## Verification
 
-Most tests compare the engine with methods that share no code with it:
+Three levels, all of them verification (not validation): V1, analytic identities and
+literature closed forms; V2, independent numerical methods; V3, agreement with established
+engines. Most tests compare the engine with methods that share no code with it:
 
 - numerical integration of the ODEs with `scipy.integrate.solve_ivp` (Radau or LSODA,
   `rtol = 1e-10`, analytic Jacobian), restarted at every event: agreement within
@@ -246,7 +256,12 @@ Most tests compare the engine with methods that share no code with it:
   route, the IV-bolus accumulation ratio `1/(1 - exp(-k tau))`, steady-state AUC over one
   interval, and mass balance (input = depot + central + peripheral + eliminated);
 - literature closed forms for Tmax and Cmax (single dose, steady state, `ka == k`), root
-  finding on textbook and reference derivatives, and textbook limits for extreme parameters.
+  finding on textbook and reference derivatives, and textbook limits for extreme parameters;
+- cross-engine golden tests (V3, `tests/golden`): 26 scenarios simulated with rxode2
+  (`linCmt()` and ODE) and mrgsolve (`$PKMODEL` and ODE) in a pinned container; pkcore agrees
+  within `1e-8` relative with the closed forms (observed about 1e-15 away from `ka ~ k`) and
+  `1e-7` with the ODE solutions (observed better than 1e-10). A CI job regenerates the
+  engine outputs and fails on drift.
 
 Consistency checks compare pkcore results with each other: linearity in dose,
 superposition, time-shift invariance (bit-identical on a dyadic time grid), AUC additivity,
@@ -255,8 +270,7 @@ vectorised against per-draw simulations, and extrema against densely sampled con
 They cannot detect errors that respect the identity being checked.
 
 Property-based tests (Hypothesis) draw random parameters and random dosing histories; CI uses
-a derandomized profile. Not yet covered: cross-engine golden tests against rxode2 and
-mrgsolve.
+a derandomized profile.
 
 ## References
 

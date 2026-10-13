@@ -59,3 +59,32 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy src tests
       - run: uv run pytest -q
+
+  golden:
+    # Regenerates the cross-engine golden outputs (tests/golden) with the pinned R engines
+    # and fails if they drift from the committed ones; tests/test_golden.py compares pkcore
+    # with the committed outputs in the test jobs.
+    name: golden (R engines)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: rocker/r-ver:4.6.1@sha256:4e6e6696ff54a86625c7f80046478e67014a2184e942b85eeff43db7b992d93e
+    env:
+      PKCORE_CRAN_SNAPSHOT: https://p3m.dev/cran/__linux__/noble/2026-10-09
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned engines
+        run: Rscript tests/golden/install.R
+      - name: Regenerate the golden outputs
+        run: Rscript tests/golden/generate.R tests/golden/scenarios golden-regenerated
+      - name: Compare with the committed outputs
+        run: Rscript tests/golden/compare.R tests/golden/outputs golden-regenerated
+      - name: Upload the regenerated outputs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: golden-outputs
+          path: golden-regenerated
+          if-no-files-found: ignore

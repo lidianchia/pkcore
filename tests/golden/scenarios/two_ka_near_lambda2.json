@@ -1,0 +1,36 @@
+{
+  "name": "two_ka_near_lambda2",
+  "description": "two-compartment: ka = 1.000001 /h, next to the fast disposition rate (1 /h)",
+  "model": {
+    "compartments": 2,
+    "cl": 5.0,
+    "v1": 10.0,
+    "q": 4.0,
+    "v2": 20.0,
+    "ka": 1.000001,
+    "f": 1.0,
+    "tlag": 0.0
+  },
+  "doses": [
+    {
+      "time": 0.0,
+      "amount": 100.0,
+      "route": "oral"
+    }
+  ],
+  "observations": {
+    "times": [
+      0.0,
+      0.5,
+      1.0,
+      2.0,
+      4.0,
+      8.0,
+      16.0,
+      24.0,
+      48.0,
+      96.0
+    ],
+    "order": "dose_first"
+  }
+}

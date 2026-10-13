@@ -73,8 +73,9 @@ bands = pk.percentile_bands(draws, doses, times, percentiles=(5, 50, 95))  # sha
 The test suite **verifies** that the code reproduces the mathematics: independent numerical
 ODE integration and matrix-exponential solutions, the textbook formulas evaluated in
 high-precision decimal arithmetic, analytic identities (for example AUC0-inf = F·D/CL and mass
-balance) and consistency checks (linearity, superposition, time-shift invariance).
-Documented cross-checks against established open-source PK engines are planned. Passing these tests says nothing about whether any particular drug
+balance), consistency checks (linearity, superposition, time-shift invariance), and
+cross-engine golden tests against rxode2 and mrgsolve run in a pinned container
+([tests/golden](tests/golden/README.md)). Passing these tests says nothing about whether any particular drug
 model describes any particular person; that is model **validation**, which needs external
 clinical data and is outside this library.
 

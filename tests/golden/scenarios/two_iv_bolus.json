@@ -1,0 +1,41 @@
+{
+  "name": "two_iv_bolus",
+  "description": "two-compartment: single IV bolus",
+  "model": {
+    "compartments": 2,
+    "cl": 3.0,
+    "v1": 15.0,
+    "q": 5.0,
+    "v2": 40.0,
+    "ka": 0.9,
+    "f": 1.0,
+    "tlag": 0.0
+  },
+  "doses": [
+    {
+      "time": 0.0,
+      "amount": 100.0,
+      "route": "iv_bolus"
+    }
+  ],
+  "observations": {
+    "times": [
+      0.0,
+      0.25,
+      0.5,
+      1.0,
+      1.5,
+      2.0,
+      3.0,
+      4.0,
+      6.0,
+      8.0,
+      12.0,
+      16.0,
+      24.0,
+      36.0,
+      48.0
+    ],
+    "order": "dose_first"
+  }
+}

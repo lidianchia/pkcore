@@ -1,0 +1,67 @@
+{
+  "name": "two_irregular",
+  "description": "two-compartment: irregular mixed history (bolus, oral with lag, infusion)",
+  "model": {
+    "compartments": 2,
+    "cl": 3.0,
+    "v1": 15.0,
+    "q": 5.0,
+    "v2": 40.0,
+    "ka": 0.9,
+    "f": 0.8,
+    "tlag": 0.3
+  },
+  "doses": [
+    {
+      "time": 0.0,
+      "amount": 50.0,
+      "route": "iv_bolus"
+    },
+    {
+      "time": 3.7,
+      "amount": 100.0,
+      "route": "oral"
+    },
+    {
+      "time": 7.25,
+      "amount": 80.0,
+      "route": "iv_infusion",
+      "duration": 1.5
+    },
+    {
+      "time": 11.1,
+      "amount": 60.0,
+      "route": "oral"
+    },
+    {
+      "time": 19.9,
+      "amount": 30.0,
+      "route": "iv_bolus"
+    }
+  ],
+  "observations": {
+    "times": [
+      0.0,
+      1.0,
+      2.5,
+      3.7,
+      4.0,
+      5.0,
+      6.5,
+      7.25,
+      8.0,
+      8.75,
+      10.0,
+      11.1,
+      11.4,
+      12.0,
+      15.0,
+      19.9,
+      20.5,
+      24.0,
+      30.0,
+      48.0
+    ],
+    "order": "dose_first"
+  }
+}
