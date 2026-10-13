@@ -205,7 +205,7 @@ packages <- c("rxode2", "mrgsolve", "jsonlite", "rxode2ll", "lotri", "dparser", 
 session <- list(
   r_version = R.version.string,
   platform = R.version$platform,
-  repos = unname(getOption("repos")[["CRAN"]]),
+  package_snapshot = Sys.getenv("PKCORE_CRAN_SNAPSHOT", "unset (packages not installed by install.R)"),
   ode_tolerance = ODE_TOLERANCE,
   packages = as.list(vapply(packages, function(p) as.character(packageVersion(p)),
                             character(1)))
