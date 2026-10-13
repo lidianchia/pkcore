@@ -31,8 +31,9 @@ Version 0.1 provides:
 Units are canonical and never converted: amounts in mg, volumes in L, times in h, clearances
 in L/h, rate constants in 1/h, concentrations in mg/L. Not in v0.1: three-compartment models,
 steady-state (SS) dose records, unit conversion, nonlinear elimination. Known limitation of
-the metrics: two extrema closer together than floating-point rounding can resolve are not
-separated (the error in Cmax or Cmin is then itself at rounding level).
+the metrics: an extremum closer to a window end, an event or another extremum than
+floating-point rounding can resolve is not separated from it (the error in Cmax or Cmin is
+then itself at rounding level).
 
 The conventions (what happens exactly at a dose time, where F and the lag time apply, how
 other engines may differ) and the numerical methods are documented in

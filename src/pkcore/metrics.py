@@ -33,8 +33,14 @@ from pkcore.doses import Dose
 from pkcore.models import Model
 
 _MAX_REFINEMENTS = 400
-_RESOLUTION = 8.0 * float(np.finfo(np.float64).eps)
+_EPS = float(np.finfo(np.float64).eps)
+_RESOLUTION = 8.0 * _EPS
 _NOISE_FLOOR = 1e-280
+# A computed sign of C' is trusted when |C'| exceeds this multiple of eps times the sum of
+# the magnitudes of its terms: rounding of the exponentials' arguments (up to about 745
+# before they underflow) bounds the error of each term by roughly (745 + c) eps.
+_SIGN_TRUST = 4096.0
+_SLOPE_MAGNITUDE = 3
 _LN2 = math.log(2.0)
 
 
@@ -100,23 +106,28 @@ def cmax(model: Model, doses: Iterable[Dose], start: float, end: float) -> Extre
     two events. There ``C'`` is a combination of at most three exponentials (rates
     ``lambda1``, ``lambda2``, ``ka``) and has at most two zeros, and the reduced
     derivative ``C'' + lambda1 C'`` changes sign at most once, between them (Rolle's
-    theorem). Each interval between events is split where that sign change is
-    (located by root finding); on each piece ``C'`` then has at most one zero, so the
-    signs of ``C'`` at the two ends decide whether the piece contains a maximum, which
-    is then located by root finding on ``C'`` (Illinois regula falsi interleaved with
-    bisection, always bracketing). Derivative values below ``1e-280`` times the dose
-    scale count as zero (near underflow their sign is unreliable).
+    theorem). This argument covers at most two disposition rate constants plus ``ka``
+    (every model in this package); kinetics with more modes raise
+    ``NotImplementedError``. Each interval between events is split where that sign
+    change is (located by root finding); on each piece ``C'`` then has at most one
+    zero, so the signs of ``C'`` at the two ends decide whether the piece contains a
+    maximum, which is then located by root finding on ``C'`` (Illinois regula falsi
+    interleaved with bisection, always bracketing). An interval whose ends have
+    opposite signs of ``C'`` holds exactly one zero and is not split, but only if both
+    signs are trusted: ``|C'| > 4096 eps S`` at both ends, with ``S`` the sum of the
+    magnitudes of the terms of ``C'``. Near a turning point the computed sign is
+    rounding noise, and spuriously opposite signs could hide two zeros. Derivative
+    values below ``1e-280`` times the dose scale count as zero (near underflow their
+    sign is unreliable).
 
     Precision: root finding stops when the bracket is at most ``8 eps |t|`` wide (8 to
     16 units in the last place of ``t``). Tmax is then exact up to the band around the
-    true Tmax in
-    which rounding makes the sign of the computed ``C'`` unreliable, roughly
-    ``eps * S / |C''(Tmax)|`` with ``S`` the sum of the magnitudes of the terms of
-    ``C'`` (against closed forms, Tmax agreed to about 1e-15 relative).
-    Cmax is evaluated at Tmax, and a Tmax error ``d`` changes ``C`` only by
-    ``O(C'' d^2)``, so Cmax is accurate to rounding error. Two extrema closer together
-    than that rounding band cannot be separated; Cmax is then still correct to
-    rounding level.
+    true Tmax in which rounding makes the sign of the computed ``C'`` unreliable,
+    roughly ``eps * S / |C''(Tmax)|`` (against closed forms, Tmax agreed to about 1e-15
+    relative). Cmax is evaluated at Tmax, and a Tmax error ``d`` changes ``C`` only by
+    ``O(C'' d^2)``, so Cmax is accurate to rounding error. A turning point within that
+    band of a window end, an event time or another turning point is not separated from
+    it; Cmax is then the value there, which differs only at rounding level.
     """
     return _extremum(model, doses, (start, end), maximum=True)
 
@@ -170,6 +181,7 @@ def _extremum(
     model: Model, doses: Iterable[Dose], window: tuple[float, float], *, maximum: bool
 ) -> Extremum:
     kin, table = prepare(model, doses)
+    _check_basis(kin)
     ta = _validation.real_number("start", window[0])
     tb = _validation.real_number("end", window[1])
     if ta > tb:
@@ -192,6 +204,7 @@ def _extremum(
         value = _evaluate(kin, table, grid, Side.RIGHT, 0)
         slope_right, slope_left = one_sided(1)
         bend_right, bend_left = one_sided(2)
+        size_right, size_left = one_sided(_SLOPE_MAGNITUDE)
 
         candidate_row = [all_rows.ravel()]
         candidate_value = [value.ravel()]
@@ -210,7 +223,8 @@ def _extremum(
             g_hi=slope_left[:, 1:].ravel(),
         )
         bends = (bend_right[:, :-1].ravel(), bend_left[:, 1:].ravel())
-        piece_row, lo, hi, g_lo, g_hi = _split(search, intervals, bends)
+        sizes = (size_right[:, :-1].ravel(), size_left[:, 1:].ravel())
+        piece_row, lo, hi, g_lo, g_hi = _split(search, intervals, bends, sizes)
         turning = _turning(g_lo, g_hi, lo, hi)
         if turning.any():
             chosen = np.nonzero(turning)[0]
@@ -244,12 +258,13 @@ def _extremum(
 class _Search:
     """Point evaluations for the extremum search.
 
-    ``at(rows, times, side, order)`` returns ``C`` (order 0), ``sign * C'`` (order 1) or
-    ``C'' + lambda1 C'`` (order 2) for row ``rows[i]`` at ``times[i]``. Derivative values
-    whose magnitude is below ``_NOISE_FLOOR`` times the row's scale (dose amount over
-    ``v1`` times the largest rate constant, to the power of the order) are set to
-    zero: so close to underflow their sign is not reliable, and they correspond to a
-    curve that is zero for all practical purposes.
+    ``at(rows, times, side, order)`` returns ``C`` (order 0), ``sign * C'`` (order 1),
+    ``C'' + lambda1 C'`` (order 2) or the sum of the magnitudes of the terms of ``C'``
+    (order 3) for row ``rows[i]`` at ``times[i]``. Values of orders 1 and 2 whose
+    magnitude is below ``_NOISE_FLOOR`` times the row's scale (dose amount over ``v1``
+    times the largest rate constant, to the power of the order) are set to zero: so
+    close to underflow their sign is not reliable, and they correspond to a curve that
+    is zero for all practical purposes.
     """
 
     kin: Kinetics
@@ -272,7 +287,7 @@ class _Search:
 
     def at(self, rows: IndexArray, times: FloatArray, side: Side, order: int) -> FloatArray:
         values = _pointwise(self.kin.take(rows), self.table, times, side, order)
-        if order == 0:
+        if order in (0, _SLOPE_MAGNITUDE):
             return values
         floor = self.floors[order - 1][rows]
         flushed = np.where(np.abs(values) < floor, 0.0, values)
@@ -329,21 +344,52 @@ def _turning(g_lo: FloatArray, g_hi: FloatArray, lo: FloatArray, hi: FloatArray)
     return (g_lo > 0.0) & (g_hi <= 0.0) & (hi > lo)
 
 
+def _check_basis(kin: Kinetics) -> None:
+    """The extremum search assumes ``C'`` is a combination of at most three exponentials.
+
+    That holds for one or two disposition rates plus ``ka``; models with more modes
+    (three compartments, metabolites, transit compartments) need a different proof.
+    """
+    if len(kin.rates) > 2:
+        raise NotImplementedError(
+            "cmax/cmin support at most two disposition rate constants (plus ka); "
+            f"this model has {len(kin.rates)}"
+        )
+
+
+def _one_zero(
+    g_lo: FloatArray, g_hi: FloatArray, trust_lo: FloatArray, trust_hi: FloatArray
+) -> BoolArray:
+    """Intervals whose ends have reliably and strictly opposite signs of ``C'``.
+
+    ``trust_lo``/``trust_hi`` are the magnitudes above which a computed value's sign is
+    trusted; zero and untrusted values never count.
+    """
+    return ((g_lo > trust_lo) & (g_hi < -trust_hi)) | ((g_lo < -trust_lo) & (g_hi > trust_hi))
+
+
 def _split(
-    search: _Search, intervals: _Intervals, bends: tuple[FloatArray, FloatArray]
+    search: _Search,
+    intervals: _Intervals,
+    bends: tuple[FloatArray, FloatArray],
+    sizes: tuple[FloatArray, FloatArray],
 ) -> _Intervals:
     """Split intervals where the reduced derivative ``C'' + lambda1 C'`` changes sign.
 
-    ``bends`` holds the reduced derivative just inside both ends of each interval. On
-    the resulting pieces ``C'`` has at most one zero. An interval whose ends have
-    strictly opposite signs of ``C'`` holds exactly one zero (it holds at most two) and
-    is not split. A value that is zero (in practice below the noise floor, near
-    underflow) counts as a change of sign, so the split then lands at the boundary of
-    the region where the sign is known; extra splits are harmless.
+    ``bends`` holds the reduced derivative and ``sizes`` the sum of the magnitudes of the
+    terms of ``C'`` just inside both ends of each interval. On the resulting pieces
+    ``C'`` has at most one zero. An interval whose ends have reliably and strictly
+    opposite signs of ``C'`` (``|C'|`` above ``_SIGN_TRUST * eps * size`` at both ends)
+    holds exactly one zero, since it holds at most two, and is not split; near an
+    extremum the computed sign of ``C'`` is rounding noise, so it is not used there. A
+    reduced derivative that is zero (in practice below the noise floor, near underflow)
+    counts as a change of sign, so the split then lands at the boundary of the region
+    where the sign is known; extra splits are harmless.
     """
     row, lo, hi, g_lo, g_hi = intervals
     bend_lo, bend_hi = bends
-    one_zero = ((g_lo > 0.0) & (g_hi < 0.0)) | ((g_lo < 0.0) & (g_hi > 0.0))
+    trust = (_SIGN_TRUST * _EPS * sizes[0], _SIGN_TRUST * _EPS * sizes[1])
+    one_zero = _one_zero(g_lo, g_hi, *trust)
     split = (bend_lo != 0.0) & (np.sign(bend_hi) != np.sign(bend_lo)) & (hi > lo) & ~one_zero
     if not split.any():
         return intervals
@@ -373,14 +419,19 @@ def _split(
 def _evaluate(
     kin: Kinetics, table: DoseTable, times: FloatArray, side: Side, order: int
 ) -> FloatArray:
-    """``C``, ``C'`` or ``C'' + lambda1 C'`` (``order`` 0, 1, 2) at per-row times (rows, n)."""
+    """``C``, ``C'``, ``C'' + lambda1 C'`` or the sum of the magnitudes of the terms of ``C'``.
+
+    ``order`` 0, 1, 2 or 3; per-row times of shape (rows, n).
+    """
     t = times[:, None, :]
     if order == 0:
         amount = central_amount(kin, table, t, side)
     elif order == 1:
         amount = central_slope(kin, table, t, side)
-    else:
+    elif order == 2:
         amount = central_bend(kin, table, t, side)
+    else:
+        amount = central_slope(kin, table, t, side, magnitude=True)
     return amount / kin.v1[:, :, 0]
 
 

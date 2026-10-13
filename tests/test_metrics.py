@@ -2,8 +2,9 @@
 
 Expected values come from literature closed forms (single-dose and steady-state
 Tmax of the one-compartment oral model, Garrett's limit for ka == k), from root
-finding with ``scipy.optimize.brentq`` on the textbook derivative, from LAPACK
-eigenvalues, and from the matrix-exponential reference evaluated on dense grids.
+finding with ``scipy.optimize.brentq`` on the textbook derivative or by bisection on
+it in 60-digit decimal arithmetic, from LAPACK eigenvalues, and from the
+matrix-exponential reference evaluated on dense grids.
 
 Tolerances: Tmax ``rtol = 1e-12`` (root finding narrows the bracket to a few units in
 the last place; what remains is the band in which rounding makes the sign of the
@@ -11,6 +12,7 @@ computed derivative unreliable, observed up to about 1e-15 relative); Cmax
 ``rtol = 1e-13`` (an error d in Tmax changes C only by O(d^2)).
 """
 
+import dataclasses
 import math
 
 import numpy as np
@@ -34,6 +36,7 @@ from reference import (
     Parameters,
     concentration_derivatives,
     concentration_slopes,
+    decimal_extremum,
     expm_solution,
     well_conditioned,
 )
@@ -278,6 +281,38 @@ def test_left_limit_of_the_reduced_derivative_at_an_event() -> None:
     assert reference[0] < reference[1]
 
 
+@pytest.mark.parametrize(
+    ("bolus", "start", "end", "maximum"),
+    [
+        (378.9694256658957, 4.247780589520126, 4.915423460688727, False),
+        (548.6910885861967, 4.5353333013510735, 4.692068169873758, True),
+    ],
+    ids=["cmin-window-ending-just-after-a-peak", "cmax-window-starting-just-before-a-dip"],
+)
+def test_interior_extremum_next_to_a_turning_point_at_a_window_end(
+    bolus: float, start: float, end: float, maximum: bool
+) -> None:
+    """A window end within rounding distance of a turning point of C.
+
+    The cmin window ends 3 units in the last place after a local maximum, the cmax
+    window starts 10 units in the last place before a local minimum; there the computed
+    sign of C' is rounding noise. Regression: the two ends of the window had opposite
+    computed signs of C', so the window was taken to hold exactly one zero of C' and was
+    not split; root finding then converged to the turning point at the window end and
+    the interior extremum was missed (Cmin 22.391 instead of 22.372, Cmax 25.315878
+    instead of 25.315979). Expected values: textbook solution in 60-digit decimal
+    arithmetic.
+    """
+    p = Parameters(cl=1.0, v1=5.0, q=50.0, v2=50.0, ka=0.5)
+    history = [Dose(0.0, 1000.0, Route.ORAL), Dose(3.5996, bolus, Route.IV_BOLUS)]
+    metric = pk.cmax if maximum else pk.cmin
+    found = metric(model_of(p), history, start, end)
+    value, time = decimal_extremum(p, history, start, end, maximum=maximum)
+    assert start + 0.05 < time < end - 0.05
+    np.testing.assert_allclose(float(found.time), time, rtol=TMAX_RTOL)
+    np.testing.assert_allclose(float(found.value), value, rtol=CMAX_RTOL)
+
+
 def test_a_slope_of_exactly_zero_at_the_end_of_a_piece_counts_as_a_turn() -> None:
     from pkcore.metrics import _refine, _turning  # noqa: PLC0415 (private helpers)
 
@@ -291,6 +326,48 @@ def test_a_slope_of_exactly_zero_at_the_end_of_a_piece_counts_as_a_turn() -> Non
 
     located = _refine(g, (np.array([0.0]), np.array([1.0])), (np.array([1.0]), np.array([0.0])))
     np.testing.assert_allclose(located, 0.3, rtol=1e-14)
+
+
+def test_only_reliable_opposite_slopes_rule_out_a_second_zero() -> None:
+    """An interval is left unsplit only if C' has trusted, strictly opposite end signs."""
+    from pkcore.metrics import _one_zero  # noqa: PLC0415 (private helper)
+
+    g_lo = np.array([1.0, -1.0, 0.0, -0.0, 1.0, -1.0, 1.0])
+    g_hi = np.array([-1.0, 1.0, -1.0, 1.0, 0.0, -0.0, 1.0])
+    zero = np.zeros(7)
+    expected = [True, True, False, False, False, False, False]
+    np.testing.assert_array_equal(_one_zero(g_lo, g_hi, zero, zero), expected)
+    # A sign is trusted only if the value is strictly beyond its trust level.
+    g_lo, g_hi = np.array([2.0, 1.0, 2.0, -1.0, -2.0]), np.array([-2.0, -2.0, -1.0, 2.0, 1.0])
+    one = np.ones(5)
+    np.testing.assert_array_equal(
+        _one_zero(g_lo, g_hi, one, one), [True, False, False, False, False]
+    )
+
+
+def test_extrema_reject_kinetics_with_more_than_two_disposition_rates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bracketing argument covers C' with at most three exponentials (lambda1, lambda2, ka).
+
+    No model in this package has more modes, so kinetics with a third disposition rate
+    are built by hand: they must be rejected rather than searched without a proof.
+    """
+    from pkcore import metrics  # noqa: PLC0415 (patched below)
+    from pkcore._engine import prepare  # noqa: PLC0415 (private helper)
+
+    model = pk.TwoCompartment(3.0, 15.0, 5.0, 40.0, ka=0.9)
+    history = [Dose(0.0, DOSE, Route.ORAL)]
+    kin, table = prepare(model, history)
+    three = dataclasses.replace(
+        kin, rates=(*kin.rates, 2.0 * kin.rates[1]), fractions=(*kin.fractions, kin.fractions[1])
+    )
+    monkeypatch.setattr(metrics, "prepare", lambda *_: (three, table))
+    for metric in (pk.cmax, pk.cmin):
+        with pytest.raises(NotImplementedError, match="at most two disposition rate constants"):
+            metric(model, history, 0.0, 24.0)
+    monkeypatch.undo()
+    assert float(pk.cmax(model, history, 0.0, 24.0).value) > 0.0
 
 
 @given(p=parameters(), history=doses(max_doses=5, horizon=36.0))

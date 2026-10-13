@@ -134,25 +134,34 @@ All metrics have the draw shape of the model (`()` or `(n,)`).
 zero of `C'` between two events. Between two events `C'` is a combination of at most three
 exponentials (rates `lambda1`, `lambda2`, `ka`), so it has at most two zeros there, and the
 reduced derivative `C'' + lambda1 C'` = `exp(-lambda1 t) (exp(lambda1 t) C')'` has at most one
-sign change, which by Rolle's theorem lies between them. Each interval between events is split
+sign change, which by Rolle's theorem lies between them. This argument needs at most two
+disposition rate constants plus `ka`, as in every model of v0.1; `cmax` and `cmin` raise
+`NotImplementedError` for kinetics with more modes (three compartments, transit compartments,
+metabolites) rather than search them without a proof. Each interval between events is split
 at that sign change, after which `C'` has at most one zero per piece, so the signs of `C'` at
 the ends of a piece decide whether it holds a maximum (or minimum); that zero is then located
 by root finding on `C'` (Illinois regula falsi interleaved with bisection, always
-bracketing). Derivative values below `1e-280` times the dose scale (total dose over `v1`,
-times the largest rate constant per order of the derivative) are treated as zero, because so
-close to underflow their sign is unreliable; such a zero counts as a change of sign.
+bracketing). An interval whose ends have opposite signs of `C'` holds exactly one zero and is
+not split, but only if both signs are trusted: `|C'|` must exceed `4096 eps S` at both ends,
+with `S` the sum of the magnitudes of the terms of `C'` (the rounding error of `C'` is a
+modest multiple of `eps S`; it grows with the arguments of the exponentials, which stay below
+about 745 until they underflow). Near a turning point the computed sign of `C'` is rounding
+noise, and spuriously opposite signs could hide two zeros. Derivative values below `1e-280`
+times the dose scale (total dose over `v1`, times the largest rate constant per order of the
+derivative) are treated as zero, because so close to underflow their sign is unreliable; such
+a zero counts as a change of sign.
 
 Root finding stops when the bracket is at most `8 eps |t|` wide (8 to 16 units in the last
-place of `t`). Tmax is
-then exact up to the band around the true Tmax in which rounding makes the sign of the
-computed `C'` unreliable, roughly `eps * S / |C''(Tmax)|` with `S` the sum of the magnitudes
-of the terms of `C'` (against closed forms, Tmax agreed to about 1e-15 relative; the tests
-assert 1e-12). Cmax and Cmin are evaluated at the located time; an error `d` in the time
-changes `C` only by `O(C'' d^2)`, so they are accurate to rounding error. Remaining
-limitation: two extrema closer together than that rounding band cannot be separated, but
-then the error in Cmax or Cmin is itself at rounding level. Ties between equal computed
-values resolve to the earliest time; peaks that are equal only up to rounding (for example at
-steady state) may be reported at any of their times.
+place of `t`). Tmax is then exact up to the band around the true Tmax in which rounding makes
+the sign of the computed `C'` unreliable, roughly `eps * S / |C''(Tmax)|` (against closed
+forms, Tmax agreed to about 1e-15 relative; the tests assert 1e-12). Cmax and Cmin are
+evaluated at the located time; an error `d` in the time changes `C` only by `O(C'' d^2)`, so
+they are accurate to rounding error. Remaining limitation: a turning point within that band
+of a window end, an event time or another turning point is not separated from it (the
+computed signs of `C'` cannot tell on which side it lies); Cmax or Cmin is then the value
+there, which differs only at rounding level. Ties between equal computed values resolve to the
+earliest time; peaks that are equal only up to rounding (for example at steady state) may be
+reported at any of their times.
 
 ## Numerical methods
 

@@ -17,6 +17,8 @@ unrelated ways.
 * :func:`decimal_oral_concentration` evaluates the textbook single-dose oral formulas
   in 60-digit decimal arithmetic, so their cancellation for ``ka ~ lambda`` is
   harmless; the ``ka == k`` limit is Garrett (1994), doi:10.1007/BF02353538.
+* :func:`decimal_extremum` locates Cmax or Cmin of IV bolus and oral doses by
+  bisection on the textbook derivative, also in 60-digit decimal arithmetic.
 
 All references use the same state vector: depot, central, peripheral, eliminated
 amounts and the AUC of the central concentration.
@@ -397,3 +399,74 @@ def decimal_one_compartment_auc(p: Parameters, dose: Dose, start: float, end: fl
             return f * amount * ka / (v * (ka - k)) * one_minus
 
         return float(exposure(end) - exposure(start))
+
+
+def decimal_bolus_oral(p: Parameters, doses: Sequence[Dose], t: Decimal, order: int) -> Decimal:
+    """``C`` (order 0) or ``dC/dt`` (order 1) of a two-compartment model, in decimal.
+
+    Textbook bi- and tri-exponential solutions for IV boluses and oral doses (no
+    infusions), summed over the doses; 60-digit arithmetic. Use within a
+    ``localcontext`` with at least that precision.
+    """
+    cl, v1, q, v2 = (Decimal(x) for x in (p.cl, p.v1, p.q, p.v2))
+    ka, f, tlag = Decimal(p.ka), Decimal(p.f), Decimal(p.tlag)
+    k10, k12, k21 = cl / v1, q / v1, q / v2
+    total = k10 + k12 + k21
+    root = (total * total - 4 * k10 * k21).sqrt()
+    lam = ((total - root) / 2, (total + root) / 2)
+    weight = ((k21 - lam[0]) / (lam[1] - lam[0]), (lam[1] - k21) / (lam[1] - lam[0]))
+
+    def term(rate: Decimal, coefficient: Decimal, tau: Decimal) -> Decimal:
+        return coefficient * (-rate) ** order * (-rate * tau).exp()
+
+    value = Decimal(0)
+    for d in doses:
+        if d.route is Route.IV_BOLUS:
+            tau = t - Decimal(d.time)
+            if tau >= 0:
+                value += (
+                    Decimal(d.amount)
+                    / v1
+                    * sum(term(r, c, tau) for r, c in zip(lam, weight, strict=True))
+                )
+        elif d.route is Route.ORAL:
+            tau = t - Decimal(d.time) - tlag
+            if tau > 0:
+                a = [(k21 - lam[i]) / ((ka - lam[i]) * (lam[1 - i] - lam[i])) for i in (0, 1)]
+                b = (k21 - ka) / ((lam[0] - ka) * (lam[1] - ka))
+                parts = term(lam[0], a[0], tau) + term(lam[1], a[1], tau) + term(ka, b, tau)
+                value += f * Decimal(d.amount) * ka / v1 * parts
+        else:
+            raise ValueError("decimal_bolus_oral supports IV boluses and oral doses only")
+    return value
+
+
+def decimal_extremum(
+    p: Parameters, doses: Sequence[Dose], start: float, end: float, *, maximum: bool
+) -> tuple[float, float]:
+    """(value, time) of the maximum or minimum of ``C`` over ``[start, end]``, in decimal.
+
+    Candidates are both ends and every zero of ``dC/dt`` found by a sign scan on 400
+    sub-intervals followed by 200 bisection steps (the window must contain no dose, and
+    two zeros within one sub-interval would be missed).
+    """
+    with localcontext() as ctx:
+        ctx.prec = 60
+        a, b = Decimal(start), Decimal(end)
+        points = [a + (b - a) * i / 400 for i in range(401)]
+        slopes = [decimal_bolus_oral(p, doses, x, 1) for x in points]
+        candidates = [a, b]
+        for i in range(400):
+            if (slopes[i] > 0) != (slopes[i + 1] > 0):
+                lo, hi = points[i], points[i + 1]
+                rising = slopes[i] > 0
+                for _ in range(200):
+                    mid = (lo + hi) / 2
+                    if (decimal_bolus_oral(p, doses, mid, 1) > 0) == rising:
+                        lo = mid
+                    else:
+                        hi = mid
+                candidates.append((lo + hi) / 2)
+        values = [(decimal_bolus_oral(p, doses, x, 0), x) for x in candidates]
+        value, time = max(values) if maximum else min(values)
+        return float(value), float(time)

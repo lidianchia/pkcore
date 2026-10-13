@@ -183,15 +183,22 @@ def central_amount(kin: Kinetics, table: DoseTable, t: FloatArray, side: Side) -
     )
 
 
-def central_slope(kin: Kinetics, table: DoseTable, t: FloatArray, side: Side) -> FloatArray:
-    """Time derivative of the central amount; one-sided (``side``) at event times."""
+def central_slope(
+    kin: Kinetics, table: DoseTable, t: FloatArray, side: Side, *, magnitude: bool = False
+) -> FloatArray:
+    """Time derivative of the central amount; one-sided (``side``) at event times.
+
+    With ``magnitude=True`` the sum of the absolute values of its terms instead, the
+    scale of the rounding error of the derivative.
+    """
     rows, columns, modes = _dims(kin, t)
+    sign = 1.0 if magnitude else -1.0
 
     def bolus(s: slice) -> FloatArray:
         tau = t - table.bolus_time[None, s, None]
         given = _given(tau, side)
         elapsed = np.where(given, tau, 0.0)
-        response = _modal(kin, lambda rate: -rate * np.exp(-rate * elapsed))
+        response = _modal(kin, lambda rate: sign * rate * np.exp(-rate * elapsed))
         return np.where(given, table.bolus_amount[None, s, None] * response, 0.0)
 
     def infusion(s: slice) -> FloatArray:
@@ -204,7 +211,7 @@ def central_slope(kin: Kinetics, table: DoseTable, t: FloatArray, side: Side) ->
         after = np.maximum(to_end, 0.0)
         rate_in = table.infusion_amount[None, s, None] / duration
         up = _modal(kin, lambda rate: np.exp(-rate * running))
-        down = _modal(kin, lambda rate: -rate * e1(rate, duration) * np.exp(-rate * after))
+        down = _modal(kin, lambda rate: sign * rate * e1(rate, duration) * np.exp(-rate * after))
         return rate_in * (_masked(started & ~ended, up) + _masked(ended, down))
 
     def oral(s: slice) -> FloatArray:
@@ -213,7 +220,9 @@ def central_slope(kin: Kinetics, table: DoseTable, t: FloatArray, side: Side) ->
         given = _given(tau, side)
         elapsed = np.where(given, tau, 0.0)
         absorbed = kin.f * table.oral_amount[None, s, None] * ka
-        response = _modal(kin, lambda rate: np.exp(-ka * elapsed) - rate * dd(rate, ka, elapsed))
+        response = _modal(
+            kin, lambda rate: np.exp(-ka * elapsed) + sign * rate * dd(rate, ka, elapsed)
+        )
         return np.where(given, absorbed * response, 0.0)
 
     return (
