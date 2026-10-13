@@ -7,7 +7,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "lidianchia" }]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["numpy>=2.0"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Science/Research",
@@ -44,6 +44,11 @@ strict = true
 warn_unreachable = true
 mypy_path = "src"
 
+[[tool.mypy.overrides]]
+# SciPy ships no type information; it is only used by tests/reference.py.
+module = ["scipy", "scipy.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
@@ -52,7 +57,13 @@ filterwarnings = ["error"]
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.169.0",
     "mypy>=2.4.0",
     "pytest>=9.1.1",
     "ruff>=0.17.0",
+    # SciPy is used only by the independent reference implementations in tests/.
+    # 1.18.0 has a batched expm accuracy regression (scipy/scipy#25924); 1.18.x needs
+    # Python >= 3.12, so Python 3.11 uses the last release line that supports it.
+    "scipy>=1.18.1; python_version >= '3.12'",
+    "scipy>=1.17.1,<1.18; python_version < '3.12'",
 ]
