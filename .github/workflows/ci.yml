@@ -80,7 +80,7 @@ jobs:
       - name: Regenerate the golden outputs
         run: Rscript tests/golden/generate.R tests/golden/scenarios golden-regenerated
       - name: Compare with the committed outputs
-        run: Rscript tests/golden/compare.R tests/golden/outputs golden-regenerated
+        run: Rscript tests/golden/compare.R tests/golden/outputs golden-regenerated tests/golden/scenarios
       - name: Upload the regenerated outputs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

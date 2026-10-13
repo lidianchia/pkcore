@@ -112,8 +112,9 @@ mrgsolve 2.0.1 for the cases pkcore supports. At a time with both a dose and an 
 rxode2 reports the post-dose value whatever the record order, and mrgsolve follows the record
 order. Bioavailability and lag times defined on the depot only behave as in pkcore. Their
 closed forms (rxode2 `linCmt()`, mrgsolve `$PKMODEL`) fail when `ka` equals a disposition
-rate: mrgsolve refuses `ka == k` for one compartment, and both deviate by tens of percent
-when `ka` equals the slow rate of two compartments, while their ODE paths agree with pkcore.
+rate: mrgsolve refuses `ka == k` for one compartment, and when `ka` equals the slow rate of
+two compartments rxode2's closed form is off by −16 % to +42 % and mrgsolve's by +17 % to
++127 %, while their ODE paths agree with pkcore.
 
 ## Metrics
 
@@ -259,9 +260,9 @@ engines. Most tests compare the engine with methods that share no code with it:
   finding on textbook and reference derivatives, and textbook limits for extreme parameters;
 - cross-engine golden tests (V3, `tests/golden`): 26 scenarios simulated with rxode2
   (`linCmt()` and ODE) and mrgsolve (`$PKMODEL` and ODE) in a pinned container; pkcore agrees
-  within `1e-8` relative with the closed forms (observed about 1e-15 away from `ka ~ k`) and
-  `1e-7` with the ODE solutions (observed better than 1e-10). A CI job regenerates the
-  engine outputs and fails on drift.
+  within `1e-8` relative with the two closed forms (observed about 1e-15 away from `ka ~ k`)
+  and `1e-7` with the ODE solutions (observed better than 1e-10; both use LSODA, so they
+  count as one method). A CI job regenerates the engine outputs and fails on drift.
 
 Consistency checks compare pkcore results with each other: linearity in dose,
 superposition, time-shift invariance (bit-identical on a dyadic time grid), AUC additivity,

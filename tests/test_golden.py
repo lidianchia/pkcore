@@ -13,7 +13,8 @@ Tolerances (``|pkcore - engine| <= rtol |engine| + atol * dose / v1``):
   for a relative gap of 1e-6; pkcore's own values there are verified against decimal
   arithmetic in ``test_near_equal_rates``).
 * ODE engines (``atol = rtol = 1e-12`` in the engines): ``rtol = 1e-7``, ``atol = 1e-9``.
-  Observed agreement is better than 1e-10.
+  Observed agreement is better than 1e-10. Both packages integrate with LSODA, so these
+  two paths are one numerical method, not two independent ones.
 
 Semantics: both engines put bioavailability and lag time on the depot only, as pkcore
 does. At a time with both an observation and a dose, rxode2 always reports the

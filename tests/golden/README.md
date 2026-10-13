@@ -22,7 +22,10 @@ library.
   - rxode2 `linCmt()`, a closed form;
   - rxode2 ODE (liblsoda, `atol = rtol = 1e-12`);
   - mrgsolve `$PKMODEL`, a closed form;
-  - mrgsolve ODE (`atol = rtol = 1e-12`).
+  - mrgsolve ODE (DLSODA from ODEPACK, `atol = rtol = 1e-12`).
+
+  The two ODE paths use the same numerical method (LSODA) in two packages, so they are
+  not two independent methods; the closed forms are independent implementations.
 - `install.R` installs the pinned engine versions.
 - `compare.R` compares a regenerated output directory with the committed one.
 - `../test_golden.py` compares pkcore with the committed outputs on every test run.
@@ -38,8 +41,9 @@ library.
 
 The `golden (R engines)` CI job regenerates the outputs in this environment. It fails if
 any value differs from the committed one by more than `1e-9` relative (plus `1e-12` of the
-largest value), or if an engine starts or stops failing. The regenerated files are uploaded
-as the `golden-outputs` artifact.
+largest value), or if an engine starts or stops failing. Outputs declared as known engine
+issues are excluded from this numeric check, because they are rounding noise. The
+regenerated files are uploaded as the `golden-outputs` artifact.
 
 To regenerate locally with Docker:
 
@@ -63,9 +67,9 @@ docker run --rm -v "$PWD":/work -w /work \
 - **`ka` equal to `k` (one compartment).** mrgsolve `$PKMODEL` refuses this case ("k10 is
   too close to ka"); the scenario declares that error.
 - **`ka` equal to the slow disposition rate (two compartments).** Neither closed form
-  handles this case: rxode2 `linCmt()` deviates by up to about 30 % and mrgsolve `$PKMODEL`
-  by up to about 56 %, and mrgsolve's values there even differ between platforms. Both ODE
-  paths agree with pkcore to about 1e-10. pkcore's values for nearly equal
+  handles this case. Relative to the exact solution, rxode2 `linCmt()` is off by −16 % to
+  +42 % and mrgsolve `$PKMODEL` by +17 % to +127 % over the scenario's times (worst at
+  4 h). Both ODE paths agree with pkcore to about 1e-10. pkcore's values for nearly equal
   rates are also verified against decimal arithmetic in `tests/test_near_equal_rates.py`.
   The scenario records these as `known_engine_issues`, and the test checks that the
   deviation is still present, so the documentation stays true.

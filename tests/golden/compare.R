@@ -1,11 +1,14 @@
 #!/usr/bin/env Rscript
 # Compares regenerated golden outputs with the committed ones.
 #
-# Usage: Rscript tests/golden/compare.R committed_dir regenerated_dir
+# Usage: Rscript tests/golden/compare.R committed_dir regenerated_dir [scenario_dir]
 #
 # Fails if the set of scenarios or engines differs, if an engine fails in one run but not
 # the other, or if any concentration differs by more than RTOL relative plus ATOL times
-# the largest value of that engine's output for the scenario.
+# the largest value of that engine's output for the scenario. Outputs that a scenario
+# declares as known engine issues (inaccurate closed forms, whose values are rounding
+# noise and may differ between platforms) are only checked for presence and length;
+# tests/test_golden.py checks that they are still wrong.
 
 suppressPackageStartupMessages(library(jsonlite))
 
@@ -13,9 +16,19 @@ RTOL <- 1e-9
 ATOL <- 1e-12
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) != 2) stop("usage: compare.R committed_dir regenerated_dir")
+if (!(length(args) %in% c(2, 3))) {
+  stop("usage: compare.R committed_dir regenerated_dir [scenario_dir]")
+}
 committed_dir <- args[[1]]
 regenerated_dir <- args[[2]]
+scenario_dir <- if (length(args) == 3) args[[3]] else {
+  file.path(dirname(normalizePath(committed_dir)), "scenarios")
+}
+
+known_issues <- function(file) {
+  scenario <- fromJSON(file.path(scenario_dir, file), simplifyVector = FALSE)
+  names(scenario$known_engine_issues)
+}
 
 names_in <- function(dir) {
   files <- list.files(dir, pattern = "\\.json$")
@@ -38,12 +51,17 @@ for (file in intersect(committed, regenerated)) {
   new <- fromJSON(file.path(regenerated_dir, file), simplifyVector = TRUE)
   if (!identical(old$times, new$times)) problems <- c(problems, sprintf("%s: times differ", file))
   engines <- union(names(old$engines), names(new$engines))
+  unstable <- known_issues(file)
   for (engine in engines) {
     a <- old$engines[[engine]]
     b <- new$engines[[engine]]
     where <- sprintf("%s / %s", file, engine)
     if (is.null(a) || is.null(b)) {
       problems <- c(problems, sprintf("%s: present in only one run", where))
+    } else if (engine %in% unstable) {
+      if (!is.null(a$error) || !is.null(b$error) || length(a$cp) != length(b$cp)) {
+        problems <- c(problems, sprintf("%s: known-issue output changed shape", where))
+      }
     } else if (!is.null(a$error) || !is.null(b$error)) {
       if (!identical(a$error, b$error)) {
         problems <- c(problems, sprintf("%s: errors differ ('%s' vs '%s')", where,
