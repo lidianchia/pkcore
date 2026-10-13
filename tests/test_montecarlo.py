@@ -65,3 +65,10 @@ def test_scalar_time_gives_one_value_per_percentile() -> None:
     bands = pk.percentile_bands(model, HISTORY, 6.0)
     assert bands.values.shape == (3,)
     assert not bands.percentiles.flags.writeable
+
+
+def test_empty_times() -> None:
+    model = pk.OneCompartment(cl=[1.0, 2.0, 4.0], v=20.0, ka=1.0)
+    bands = pk.percentile_bands(model, HISTORY, [])
+    assert bands.values.shape == (3, 0)
+    assert bands.n_draws == 3

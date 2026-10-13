@@ -67,11 +67,17 @@ irregular, unsorted or negative, infusions may overlap, and several doses may sh
   exactly at `t`, because infusions and first-order absorption are continuous. It is computed
   exactly, not by evaluating at `t - epsilon`.
 - **Lag time.** An oral dose contributes from `t0 + tlag` on (nothing during the lag).
+- **Event times in floating point.** The time at which an oral dose enters the depot is the
+  floating-point number `t0 + tlag`, and an infusion ends at `t0 + duration`; every
+  comparison (is a time before or after the event?) uses exactly these numbers. For example
+  with `t0 = 0.7` and `tlag = 0.1` the input happens at `0.7999999999999999`.
 - **Bioavailability.** `f` scales the oral amount. In v0.1 neither `f` nor `tlag` is applied
   to IV boluses or infusions.
 - **Steady state.** There are no steady-state (SS) dose records in v0.1. Simulate enough prior
-  doses instead: after `n` doses every `tau`, the remaining distance to steady state is
-  about `exp(-lambda_z n tau)` relative (`lambda_z = terminal_rate(model)`).
+  doses instead: after `n` doses every `tau`, the remaining distance to steady state is of
+  the order of `exp(-r n tau)`, where `r` is the slowest rate in the system:
+  `terminal_rate(model)` for IV doses and `apparent_oral_terminal_rate(model)`
+  (`min(ka, lambda_z)`) for oral doses.
 - **No dosing events.** An empty history gives exactly zero for every output.
 - **One drug per call.** A model plus its doses describes one drug. pkcore keeps no state
   between calls and has no function that adds up concentrations of different drugs.
@@ -138,7 +144,9 @@ Foster & Upton 2015). The discriminant is computed in the cancellation-free form
 `(k10 - k21)^2 + k12 (k12 + 2 k10 + 2 k21)` (strictly positive), `lambda2 = (s + r)/2` and
 `lambda1 = k10 k21 / lambda2` (no subtraction), and the coefficients
 `c1 = (k21 - lambda1)/r`, `c2 = (lambda2 - k21)/r` from whichever of the two gaps has no
-cancellation, using `(k21 - lambda1)(lambda2 - k21) = k12 k21`. Both coefficients lie in
+cancellation, using `(k21 - lambda1)(lambda2 - k21) = k12 k21` and
+`(lambda2 - k21) - (k21 - lambda1) = (k10 - k21) + k12`. The only subtraction, `k10 - k21`,
+is exact when the two are within a factor of two (Sterbenz). Both coefficients lie in
 (0, 1).
 
 **Kernels.** With `psi(x) = (1 - exp(-x))/x` (`psi(0) = 1`), evaluated with `expm1`:

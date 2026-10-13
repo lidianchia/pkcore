@@ -23,7 +23,7 @@ class Route(StrEnum):
     """First-order absorption from a depot (model parameters ``ka``, ``f``, ``tlag``)."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class Dose:
     """One dose event.
 
@@ -32,7 +32,8 @@ class Dose:
             enters the depot at ``time + tlag``.
         amount: Amount administered (mg), finite and >= 0. For oral doses only the
             fraction ``f`` (bioavailability) of it is absorbed.
-        route: A :class:`Route` (or its string value, e.g. ``"oral"``).
+        route: A :class:`Route`; the constructor also accepts its string value, e.g.
+            ``"oral"``.
         duration: Infusion duration (h), finite and > 0. Required for
             ``Route.IV_INFUSION`` and must be ``None`` for the other routes.
     """
@@ -40,31 +41,35 @@ class Dose:
     time: float
     amount: float
     route: Route
-    duration: float | None = None
+    duration: float | None
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self, time: float, amount: float, route: Route | str, duration: float | None = None
+    ) -> None:
         try:
-            route = Route(self.route)
+            checked_route = Route(route)
         except ValueError:
             choices = ", ".join(repr(r.value) for r in Route)
-            raise ValueError(f"route must be one of {choices}; got {self.route!r}") from None
-        time = _validation.real_number("Dose.time", self.time)
-        amount = _validation.real_number("Dose.amount", self.amount)
-        if amount < 0.0:
-            raise ValueError(f"Dose.amount must be >= 0, got {amount!r}")
-        duration: float | None = None
-        if route is Route.IV_INFUSION:
-            if self.duration is None:
+            raise ValueError(f"route must be one of {choices}; got {route!r}") from None
+        checked_time = _validation.real_number("Dose.time", time)
+        checked_amount = _validation.real_number("Dose.amount", amount)
+        if checked_amount < 0.0:
+            raise ValueError(f"Dose.amount must be >= 0, got {checked_amount!r}")
+        checked_duration: float | None = None
+        if checked_route is Route.IV_INFUSION:
+            if duration is None:
                 raise ValueError("an IV infusion needs a duration (h) > 0")
-            duration = _validation.real_number("Dose.duration", self.duration)
-            if duration <= 0.0:
-                raise ValueError(f"Dose.duration must be > 0, got {duration!r}")
-        elif self.duration is not None:
-            raise ValueError(f"duration applies only to IV infusions, not to route {route.value!r}")
-        object.__setattr__(self, "route", route)
-        object.__setattr__(self, "time", time)
-        object.__setattr__(self, "amount", amount)
-        object.__setattr__(self, "duration", duration)
+            checked_duration = _validation.real_number("Dose.duration", duration)
+            if checked_duration <= 0.0:
+                raise ValueError(f"Dose.duration must be > 0, got {checked_duration!r}")
+        elif duration is not None:
+            raise ValueError(
+                f"duration applies only to IV infusions, not to route {checked_route.value!r}"
+            )
+        object.__setattr__(self, "time", checked_time)
+        object.__setattr__(self, "amount", checked_amount)
+        object.__setattr__(self, "route", checked_route)
+        object.__setattr__(self, "duration", checked_duration)
 
     @property
     def rate(self) -> float | None:

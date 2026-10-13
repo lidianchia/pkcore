@@ -183,6 +183,12 @@ def test_extremum_window_and_grid_are_validated(metric: Callable[..., pk.Extremu
         metric(model, BOLUS, 0.0, 1.0, grid_points=10.0)
 
 
+def test_grid_points_accepts_numpy_integers() -> None:
+    model = pk.OneCompartment(cl=1.0, v=10.0)
+    peak = pk.cmax(model, BOLUS, 0.0, 1.0, grid_points=np.int64(11))
+    assert float(peak.time) == 0.0
+
+
 @pytest.mark.parametrize("percentiles", [[101.0], [-1.0], [], [[5.0, 95.0]], [math.nan]])
 def test_percentiles_are_validated(percentiles: Any) -> None:
     model = pk.OneCompartment(cl=[1.0, 2.0], v=10.0)

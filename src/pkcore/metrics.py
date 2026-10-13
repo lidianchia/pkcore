@@ -7,8 +7,10 @@ a dense grid and then refined with the analytic derivative (see :func:`cmax`).
 """
 
 import math
+import operator
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import SupportsIndex
 
 import numpy as np
 import numpy.typing as npt
@@ -87,7 +89,12 @@ class Extremum:
 
 
 def cmax(
-    model: Model, doses: Iterable[Dose], start: float, end: float, *, grid_points: int = 1001
+    model: Model,
+    doses: Iterable[Dose],
+    start: float,
+    end: float,
+    *,
+    grid_points: SupportsIndex = 1001,
 ) -> Extremum:
     """Return the maximum of ``C(t)`` over the closed window ``[start, end]`` and its time.
 
@@ -114,7 +121,12 @@ def cmax(
 
 
 def cmin(
-    model: Model, doses: Iterable[Dose], start: float, end: float, *, grid_points: int = 1001
+    model: Model,
+    doses: Iterable[Dose],
+    start: float,
+    end: float,
+    *,
+    grid_points: SupportsIndex = 1001,
 ) -> Extremum:
     """Return the infimum of ``C(t)`` over the closed window ``[start, end]`` and its time.
 
@@ -164,34 +176,16 @@ def _extremum(
     model: Model,
     doses: Iterable[Dose],
     window: tuple[float, float],
-    grid_points: int,
+    grid_points: SupportsIndex,
     *,
     maximum: bool,
 ) -> Extremum:
     kin, table = prepare(model, doses)
-    ta = _validation.real_number("start", window[0])
-    tb = _validation.real_number("end", window[1])
-    if ta > tb:
-        raise ValueError(f"start must be <= end; got [{ta}, {tb}]")
-    if isinstance(grid_points, bool) or not isinstance(grid_points, int):
-        raise TypeError("grid_points must be an int")
-    if grid_points < 2:
-        raise ValueError("grid_points must be >= 2")
+    ta, tb, count = _window(window, grid_points)
     rows = kin.rows
     sign = 1.0 if maximum else -1.0
     with np.errstate(all="ignore"):
-        # Grid: equally spaced points plus every event time in (ta, tb] (other events
-        # are moved onto `ta`, where duplicates are harmless; an event at `tb` matters
-        # through its left limit).
-        events = event_times(kin, table)
-        events = np.where((events > ta) & (events <= tb), events, ta)
-        base = np.broadcast_to(np.linspace(ta, tb, grid_points), (rows, grid_points))
-        combined = np.concatenate([base, events], axis=1)
-        order = np.argsort(combined, axis=1, kind="stable")
-        grid = np.take_along_axis(combined, order, axis=1)
-        # Left limits differ from right values only at event times, so a grid point
-        # needs its own left limit if any entry with the same time is an event.
-        at_event = _shares_time_with_event(grid, order >= grid_points)
+        grid, at_event = _grid(kin, table, ta, tb, count)
         event_row, event_column = np.nonzero(at_event)
         event_time = grid[event_row, event_column]
 
@@ -255,6 +249,42 @@ def _extremum(
         value=finish(value[:, None], kin, (), what),
         time=finish(time[:, None], kin, (), f"time of {what}"),
     )
+
+
+def _window(window: tuple[float, float], grid_points: SupportsIndex) -> tuple[float, float, int]:
+    ta = _validation.real_number("start", window[0])
+    tb = _validation.real_number("end", window[1])
+    if ta > tb:
+        raise ValueError(f"start must be <= end; got [{ta}, {tb}]")
+    if isinstance(grid_points, bool | np.bool_):
+        raise TypeError("grid_points must be an int")
+    try:
+        count = operator.index(grid_points)
+    except TypeError:
+        raise TypeError("grid_points must be an int") from None
+    if count < 2:
+        raise ValueError("grid_points must be >= 2")
+    return ta, tb, count
+
+
+def _grid(
+    kin: Kinetics, table: DoseTable, ta: float, tb: float, count: int
+) -> tuple[FloatArray, BoolArray]:
+    """Sorted per-row grid on [ta, tb] and a mask of the points that are event times.
+
+    The grid holds ``count`` equally spaced points plus every event time in
+    ``(ta, tb]`` (other events are moved onto ``ta``, where duplicates are harmless;
+    an event at ``tb`` matters through its left limit). Left limits differ from right
+    values only at event times, so a grid point is marked if any entry with the same
+    time is an event.
+    """
+    events = event_times(kin, table)
+    events = np.where((events > ta) & (events <= tb), events, ta)
+    base = np.broadcast_to(np.linspace(ta, tb, count), (kin.rows, count))
+    combined = np.concatenate([base, events], axis=1)
+    order = np.argsort(combined, axis=1, kind="stable")
+    grid = np.take_along_axis(combined, order, axis=1)
+    return grid, _shares_time_with_event(grid, order >= count)
 
 
 def _shares_time_with_event(grid: FloatArray, is_event: BoolArray) -> BoolArray:

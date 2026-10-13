@@ -110,6 +110,14 @@ def test_oral_dose_starts_after_the_lag_time(name: str) -> None:
     assert pk.concentration(model, history, [2.0 + p.tlag + 1e-3])[0] > 0.0
 
 
+def test_oral_input_time_is_dose_time_plus_lag_in_floating_point() -> None:
+    model = pk.OneCompartment(2.0, 20.0, ka=1.3, f=0.7, tlag=0.1)
+    history = [Dose(0.7, DOSE, Route.ORAL)]
+    start = 0.7 + 0.1  # 0.7999999999999999
+    assert pk.amounts(model, history, [start]).depot[0] == pytest.approx(0.7 * DOSE, rel=1e-15)
+    assert pk.amounts(model, history, [np.nextafter(start, 0.0)]).depot[0] == 0.0
+
+
 def test_vectorised_draws_match_scalar_simulations() -> None:
     draws = pk.TwoCompartment(
         cl=[1.0, 3.0, 8.0], v1=[10.0, 15.0, 30.0], q=5.0, v2=[20.0, 40.0, 80.0], ka=0.9, f=0.8

@@ -93,14 +93,13 @@ def concentration_scale(p: Parameters, history: list[Dose]) -> float:
 def administered(p: Parameters, history: list[Dose], t: float) -> float:
     """Input received by time ``t``: boluses, infused amounts and f * oral after the lag.
 
-    An oral dose counts once ``(t - time) - tlag >= 0``, the convention (including the
-    order of the floating-point operations) of pkcore's right-continuous evaluation.
+    An oral dose counts from ``time + tlag`` on (right-continuous, like pkcore).
     """
     total = 0.0
     for d in history:
         if d.route is Route.IV_BOLUS and d.time <= t:
             total += d.amount
-        elif d.route is Route.ORAL and (t - d.time) - p.tlag >= 0.0:
+        elif d.route is Route.ORAL and t >= d.time + p.tlag:
             total += p.f * d.amount
         elif d.route is Route.IV_INFUSION and d.duration is not None:
             total += d.amount / d.duration * float(np.clip(t - d.time, 0.0, d.duration))

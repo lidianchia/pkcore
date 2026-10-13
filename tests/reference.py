@@ -84,11 +84,14 @@ class Solution:
         return self.left["central"] / self.v1
 
 
-def _infusion_rate(doses: Sequence[Dose], t0: float) -> float:
-    """Total infusion rate on a segment starting at ``t0``."""
+def infusion_rate(doses: Sequence[Dose], t: float, *, left: bool = False) -> float:
+    """Total infusion rate just after ``t`` (or just before it, with ``left=True``)."""
     total = 0.0
     for d in doses:
-        if d.duration is not None and d.time <= t0 < d.time + d.duration:
+        if d.duration is None:
+            continue
+        end = d.time + d.duration
+        if (d.time < t <= end) if left else (d.time <= t < end):
             total += d.amount / d.duration
     return total
 
@@ -134,7 +137,7 @@ def _solve(p: Parameters, doses: Sequence[Dose], times: npt.ArrayLike, step: Ste
         for k, name in enumerate(STATES):
             right[name][hit] = y[k]
         if i + 1 < len(points):
-            y = step(y, t, points[i + 1], _infusion_rate(doses, t))
+            y = step(y, t, points[i + 1], infusion_rate(doses, t))
     return Solution(right=right, left=left, v1=p.v1)
 
 
@@ -289,3 +292,29 @@ def decimal_oral_auc(p: Parameters, dose: float, t: float) -> float:
             one_minus = ((1 - (-k * tau).exp()) / k) - ((1 - (-ka * tau).exp()) / ka)
             value = f * amount * ka / (v * (ka - k)) * one_minus
         return float(value)
+
+
+def concentration_slopes(
+    p: Parameters, doses: Sequence[Dose], times: npt.ArrayLike
+) -> tuple[FloatArray, FloatArray, FloatArray]:
+    """One-sided derivatives ``dC/dt`` (right, left) from exact states and the ODE.
+
+    The states come from :func:`expm_solution` (right values and left limits) and the
+    derivative from the right-hand side ``A y + b`` with the infusion rate active just
+    after (right) or just before (left) each time. Also returns, for tolerances, the sum
+    of the magnitudes of the terms of ``dC/dt``.
+    """
+    obs = np.asarray(times, dtype=float)
+    solution = expm_solution(p, doses, obs)
+    a = p.matrix()
+    right, left, scale = np.zeros(obs.shape), np.zeros(obs.shape), np.zeros(obs.shape)
+    for i, t in enumerate(obs):
+        for states, rate, out in (
+            (solution.right, infusion_rate(doses, float(t)), right),
+            (solution.left, infusion_rate(doses, float(t), left=True), left),
+        ):
+            y = np.array([states[name][i] for name in STATES])
+            out[i] = (float(a[1] @ y) + rate) / p.v1
+            terms = float(np.abs(a[1]) @ np.abs(y)) + rate
+            scale[i] = max(scale[i], terms / p.v1)
+    return right, left, scale

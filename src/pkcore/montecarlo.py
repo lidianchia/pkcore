@@ -53,7 +53,7 @@ def percentile_bands(
         raise ValueError(f"percentiles must lie in [0, 100], got {levels.tolist()}")
     t = _validation.times("times", times)
     curves = concentration(model, doses, t)
-    draws = curves.reshape((-1, *t.shape))
+    draws = curves.reshape((model.n_draws or 1, *t.shape))
     values = np.percentile(draws, levels, axis=0, method="linear")
     levels.setflags(write=False)
     return PercentileBands(percentiles=levels, values=values, n_draws=int(draws.shape[0]))

@@ -20,7 +20,7 @@ from scipy.optimize import brentq
 import pkcore as pk
 from pk_strategies import EXPM_ATOL, EXPM_RTOL, concentration_scale, doses, model_of, parameters
 from pkcore import Dose, Route
-from reference import Parameters, expm_solution, well_conditioned
+from reference import Parameters, concentration_slopes, expm_solution, well_conditioned
 
 DOSE = 100.0
 TMAX_RTOL = 1e-9
@@ -40,6 +40,22 @@ def test_single_oral_dose_peak_matches_closed_form(ka: float, k: float) -> None:
     np.testing.assert_allclose(
         float(peak.value), f * DOSE / v * math.exp(-k * t_peak), rtol=CMAX_RTOL
     )
+
+
+@pytest.mark.parametrize(
+    ("dose_time", "ka", "end", "grid_points"),
+    [(0.7, 5.0, 2000.0, 1001), (0.7, 8.0, 72.0, 101), (8.7, 8.0, 72.0, 101), (0.7, 8.0, 72.0, 2)],
+)
+def test_peak_after_a_lag_that_is_not_exactly_representable(
+    dose_time: float, ka: float, end: float, grid_points: int
+) -> None:
+    """Absorption starts at fl(time + tlag) = 0.7999999999999999 for time 0.7, tlag 0.1."""
+    k, v, tlag = 0.1, 20.0, 0.1
+    model = pk.OneCompartment(k * v, v, ka=ka, tlag=tlag)
+    peak = pk.cmax(model, [Dose(dose_time, DOSE, Route.ORAL)], 0.0, end, grid_points=grid_points)
+    t_peak = math.log(ka / k) / (ka - k)
+    np.testing.assert_allclose(float(peak.time), dose_time + tlag + t_peak, rtol=TMAX_RTOL)
+    np.testing.assert_allclose(float(peak.value), DOSE / v * math.exp(-k * t_peak), rtol=CMAX_RTOL)
 
 
 def test_peak_of_an_infusion_and_of_a_bolus() -> None:
@@ -97,11 +113,15 @@ def test_two_compartment_peak_matches_root_of_textbook_derivative() -> None:
 
 
 def test_coarse_grid_still_finds_the_peak() -> None:
-    model = pk.OneCompartment(2.0, 20.0, ka=1.3, f=0.7, tlag=0.75)
-    fine = pk.cmax(model, [Dose(0.0, DOSE, Route.ORAL)], 0.0, 96.0)
+    """With grid_points=2 the grid is the window ends plus the event times only."""
+    k, ka, v, f, tlag = 0.1, 1.3, 20.0, 0.7, 0.75
+    model = pk.OneCompartment(k * v, v, ka=ka, f=f, tlag=tlag)
     coarse = pk.cmax(model, [Dose(0.0, DOSE, Route.ORAL)], 0.0, 96.0, grid_points=2)
-    np.testing.assert_allclose(float(coarse.time), float(fine.time), rtol=TMAX_RTOL)
-    np.testing.assert_allclose(float(coarse.value), float(fine.value), rtol=CMAX_RTOL)
+    t_peak = math.log(ka / k) / (ka - k)
+    np.testing.assert_allclose(float(coarse.time), tlag + t_peak, rtol=TMAX_RTOL)
+    np.testing.assert_allclose(
+        float(coarse.value), f * DOSE / v * math.exp(-k * t_peak), rtol=CMAX_RTOL
+    )
 
 
 def test_turning_point_just_before_a_dose_that_sits_on_a_grid_point() -> None:
@@ -162,38 +182,52 @@ def test_interior_minimum_matches_closed_form() -> None:
         return (bolus + infusion) / v1
 
     model = pk.TwoCompartment(cl, v1, q, v2)
-    history = [Dose(0.0, dose, Route.IV_BOLUS), Dose(0.0, rate * 24.0, Route.IV_INFUSION, 24.0)]
-    low = pk.cmin(model, history, 0.0, 24.0)
-    assert 1.0 < t_star < 23.0
-    np.testing.assert_allclose(float(low.time), t_star, rtol=TMAX_RTOL)
-    np.testing.assert_allclose(float(low.value), textbook(t_star), rtol=CMAX_RTOL)
+    assert 4.0 < t_star < 5.0
+    # With an infusion that ends at 5 h, just after the minimum, and grid_points=2 the
+    # only grid points in [0, 5] are 0 and 5 (also the infusion end): the minimum is
+    # found only if the left derivative at the infusion end is (correctly) positive.
+    for duration, grid_points in ((24.0, 1001), (5.0, 2), (5.0, 1001)):
+        history = [
+            Dose(0.0, dose, Route.IV_BOLUS),
+            Dose(0.0, rate * duration, Route.IV_INFUSION, duration),
+        ]
+        low = pk.cmin(model, history, 0.0, 5.0, grid_points=grid_points)
+        np.testing.assert_allclose(float(low.time), t_star, rtol=TMAX_RTOL)
+        np.testing.assert_allclose(float(low.value), textbook(t_star), rtol=CMAX_RTOL)
 
 
 @given(p=parameters(), history=doses(max_doses=5, horizon=36.0))
 def test_extrema_bound_the_reference_curve(p: Parameters, history: list[Dose]) -> None:
-    """Cmax/Cmin are the max/infimum of the reference curve and are attained."""
+    """Cmax and Cmin bound the reference curve, are attained, and are stationary.
+
+    The reference (matrix exponential) is sampled at 2000 points plus every event
+    time; Cmax must not be below any sample and Cmin not above any sample or left
+    limit, both must be values of the reference curve, and an interior Tmax away from
+    events must be a zero of the reference derivative.
+    """
     assume(well_conditioned(p))
     start, end = 0.0, 48.0
     model = model_of(p)
     scale = concentration_scale(p, history)
     events = [d.time for d in history] + [d.time + p.tlag for d in history]
     events += [d.time + d.duration for d in history if d.duration is not None]
-    grid = np.unique(np.concatenate([np.linspace(start, end, 400), events]))
+    grid = np.unique(np.concatenate([np.linspace(start, end, 2000), events]))
     grid = grid[(grid >= start) & (grid <= end)]
     reference = expm_solution(p, history, grid)
     tolerance = EXPM_ATOL * scale + EXPM_RTOL * float(np.max(reference.concentration))
     peak, low = pk.cmax(model, history, start, end), pk.cmin(model, history, start, end)
     assert float(peak.value) >= np.max(reference.concentration) - tolerance
-    lefts = reference.trough[grid > start]
-    assert (
-        float(low.value)
-        <= min(np.min(reference.concentration), np.min(lefts, initial=np.inf)) + tolerance
-    )
+    lowest = min(np.min(reference.concentration), np.min(reference.trough[grid > start]))
+    assert float(low.value) <= lowest + tolerance
     at = expm_solution(p, history, [float(peak.time), float(low.time)])
     np.testing.assert_allclose(at.concentration[0], float(peak.value), rtol=1e-9, atol=tolerance)
     # the infimum is a value or (inside the window) a left limit of the reference curve
     attained = [at.concentration[1]] + ([at.trough[1]] if float(low.time) > start else [])
     assert min(abs(x - float(low.value)) for x in attained) <= 1e-9 * float(low.value) + tolerance
+    t_peak = float(peak.time)
+    if start < t_peak < end and min(abs(t_peak - e) for e in [*events, start]) > 1e-6:
+        right, _, size = concentration_slopes(p, history, [t_peak])
+        assert abs(right[0]) <= 1e-6 * size[0] + tolerance
 
 
 def test_terminal_rates_and_half_lives() -> None:

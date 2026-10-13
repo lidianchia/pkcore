@@ -6,6 +6,12 @@ as ``(rows, doses, times)``: model parameters have shape ``(rows, 1, 1)``, dose 
 ``(1, doses, 1)`` and evaluation times ``(rows or 1, 1, times)``. Doses are processed
 in chunks so that temporary arrays stay below a fixed element budget.
 
+Event times are computed once, as floating-point numbers, and every decision about
+which side of an event a time lies on compares the time with them directly: an oral
+dose starts at ``fl(time + tlag)`` and an infusion ends at ``fl(time + duration)``.
+The grids used by the metrics contain exactly these numbers, so one-sided values and
+slopes at event times are consistent with the grid.
+
 Nothing here keeps state between calls: every function depends only on its arguments.
 """
 
@@ -43,6 +49,7 @@ class DoseTable:
     infusion_time: FloatArray
     infusion_amount: FloatArray
     infusion_duration: FloatArray
+    infusion_end: FloatArray
     oral_time: FloatArray
     oral_amount: FloatArray
 
@@ -60,12 +67,15 @@ def prepare(model: Model, doses: Iterable[Dose]) -> tuple[Kinetics, DoseTable]:
     def column(route: Route, attribute: str) -> FloatArray:
         return np.array([getattr(d, attribute) for d in items if d.route is route], dtype=float)
 
+    infusion_time = column(Route.IV_INFUSION, "time")
+    infusion_duration = column(Route.IV_INFUSION, "duration")
     table = DoseTable(
         bolus_time=column(Route.IV_BOLUS, "time"),
         bolus_amount=column(Route.IV_BOLUS, "amount"),
-        infusion_time=column(Route.IV_INFUSION, "time"),
+        infusion_time=infusion_time,
         infusion_amount=column(Route.IV_INFUSION, "amount"),
-        infusion_duration=column(Route.IV_INFUSION, "duration"),
+        infusion_duration=infusion_duration,
+        infusion_end=infusion_time + infusion_duration,
         oral_time=column(Route.ORAL, "time"),
         oral_amount=column(Route.ORAL, "amount"),
     )
@@ -115,6 +125,11 @@ def _masked(mask: BoolArray, values: FloatArray) -> FloatArray:
     return np.where(mask, values, 0.0)
 
 
+def _oral_start(kin: Kinetics, table: DoseTable, s: slice) -> FloatArray:
+    """Times at which the oral doses ``s`` enter the depot, ``fl(time + tlag)``."""
+    return table.oral_time[None, s, None] + kin.tlag
+
+
 def _absorption(kin: Kinetics) -> FloatArray:
     if kin.ka is None:  # prepare() rejects oral doses for models without ka
         raise ValueError("oral doses need a model with an absorption rate constant (ka)")
@@ -134,15 +149,14 @@ def central_amount(kin: Kinetics, table: DoseTable, t: FloatArray, side: Side) -
 
     def infusion(s: slice) -> FloatArray:
         duration = table.infusion_duration[None, s, None]
-        tau = t - table.infusion_time[None, s, None]
-        running = np.clip(tau, 0.0, duration)
-        after = np.maximum(tau - duration, 0.0)
+        running = np.clip(t - table.infusion_time[None, s, None], 0.0, duration)
+        after = np.maximum(t - table.infusion_end[None, s, None], 0.0)
         rate_in = table.infusion_amount[None, s, None] / duration
         return rate_in * _modal(kin, lambda rate: np.exp(-rate * after) * e1(rate, running))
 
     def oral(s: slice) -> FloatArray:
         ka = _absorption(kin)
-        elapsed = np.maximum(t - table.oral_time[None, s, None] - kin.tlag, 0.0)
+        elapsed = np.maximum(t - _oral_start(kin, table, s), 0.0)
         absorbed = kin.f * table.oral_amount[None, s, None] * ka
         return absorbed * _modal(kin, lambda rate: dd(rate, ka, elapsed))
 
@@ -167,22 +181,19 @@ def central_slope(kin: Kinetics, table: DoseTable, t: FloatArray, side: Side) ->
     def infusion(s: slice) -> FloatArray:
         duration = table.infusion_duration[None, s, None]
         tau = t - table.infusion_time[None, s, None]
-        if side is Side.RIGHT:
-            rising = np.logical_and(tau >= 0.0, tau < duration)
-            falling = tau >= duration
-        else:
-            rising = np.logical_and(tau > 0.0, tau <= duration)
-            falling = tau > duration
+        to_end = t - table.infusion_end[None, s, None]
+        started = _given(tau, side)
+        ended = _given(to_end, side)
         running = np.clip(tau, 0.0, duration)
-        after = np.maximum(tau - duration, 0.0)
+        after = np.maximum(to_end, 0.0)
         rate_in = table.infusion_amount[None, s, None] / duration
         up = _modal(kin, lambda rate: np.exp(-rate * running))
         down = _modal(kin, lambda rate: -rate * e1(rate, duration) * np.exp(-rate * after))
-        return rate_in * (_masked(rising, up) + _masked(falling, down))
+        return rate_in * (_masked(started & ~ended, up) + _masked(ended, down))
 
     def oral(s: slice) -> FloatArray:
         ka = _absorption(kin)
-        tau = t - table.oral_time[None, s, None] - kin.tlag
+        tau = t - _oral_start(kin, table, s)
         given = _given(tau, side)
         elapsed = np.where(given, tau, 0.0)
         absorbed = kin.f * table.oral_amount[None, s, None] * ka
@@ -210,9 +221,8 @@ def peripheral_amount(kin: Kinetics, table: DoseTable, t: FloatArray) -> FloatAr
 
     def infusion(s: slice) -> FloatArray:
         duration = table.infusion_duration[None, s, None]
-        tau = t - table.infusion_time[None, s, None]
-        running = np.clip(tau, 0.0, duration)
-        after = np.maximum(tau - duration, 0.0)
+        running = np.clip(t - table.infusion_time[None, s, None], 0.0, duration)
+        after = np.maximum(t - table.infusion_end[None, s, None], 0.0)
         rate_in = table.infusion_amount[None, s, None] / duration
         response = dd(slow, fast, after) * e1(slow, running) + np.exp(-fast * after) * e2(
             slow, fast, running
@@ -221,7 +231,7 @@ def peripheral_amount(kin: Kinetics, table: DoseTable, t: FloatArray) -> FloatAr
 
     def oral(s: slice) -> FloatArray:
         ka = _absorption(kin)
-        elapsed = np.maximum(t - table.oral_time[None, s, None] - kin.tlag, 0.0)
+        elapsed = np.maximum(t - _oral_start(kin, table, s), 0.0)
         absorbed = kin.f * table.oral_amount[None, s, None] * ka
         return absorbed * k12 * conv3(slow, fast, ka, elapsed)
 
@@ -238,7 +248,7 @@ def depot_amount(kin: Kinetics, table: DoseTable, t: FloatArray) -> FloatArray:
 
     def oral(s: slice) -> FloatArray:
         ka = _absorption(kin)
-        tau = t - table.oral_time[None, s, None] - kin.tlag
+        tau = t - _oral_start(kin, table, s)
         given = _given(tau, Side.RIGHT)
         elapsed = np.where(given, tau, 0.0)
         return np.where(
@@ -271,12 +281,12 @@ def central_integral(kin: Kinetics, table: DoseTable, t1: FloatArray, t2: FloatA
 
     def infusion(s: slice) -> FloatArray:
         duration = table.infusion_duration[None, s, None]
-        tau1 = t1 - table.infusion_time[None, s, None]
-        tau2 = t2 - table.infusion_time[None, s, None]
-        run_start = np.clip(tau1, 0.0, duration)
-        run_width = np.clip(tau2, 0.0, duration) - run_start
-        after_start = np.maximum(tau1, duration)
-        after_width = np.maximum(tau2, duration) - after_start
+        begin = table.infusion_time[None, s, None]
+        end = table.infusion_end[None, s, None]
+        run_start = np.clip(t1 - begin, 0.0, duration)
+        run_width = np.clip(t2 - begin, 0.0, duration) - run_start
+        after_start = np.maximum(t1 - end, 0.0)
+        after_width = np.maximum(t2 - end, 0.0) - after_start
         rate_in = table.infusion_amount[None, s, None] / duration
         zero = np.zeros_like(duration)
 
@@ -284,15 +294,16 @@ def central_integral(kin: Kinetics, table: DoseTable, t1: FloatArray, t2: FloatA
             running = run_width * e1(rate, run_start) + np.exp(-rate * run_start) * e2(
                 zero, rate, run_width
             )
-            after = e1(rate, duration) * np.exp(-rate * (after_start - duration))
+            after = e1(rate, duration) * np.exp(-rate * after_start)
             return running + after * e1(rate, after_width)
 
         return rate_in * _modal(kin, response)
 
     def oral(s: slice) -> FloatArray:
         ka = _absorption(kin)
-        start = np.maximum(t1 - table.oral_time[None, s, None] - kin.tlag, 0.0)
-        width = np.maximum(t2 - table.oral_time[None, s, None] - kin.tlag, 0.0) - start
+        begin = _oral_start(kin, table, s)
+        start = np.maximum(t1 - begin, 0.0)
+        width = np.maximum(t2 - begin, 0.0) - start
         absorbed = kin.f * table.oral_amount[None, s, None] * ka
         response = _modal(
             kin,
@@ -314,10 +325,8 @@ def event_times(kin: Kinetics, table: DoseTable) -> FloatArray:
 
     Bolus times, infusion starts and ends, and lag-shifted oral dose times.
     """
-    fixed = np.concatenate(
-        [table.bolus_time, table.infusion_time, table.infusion_time + table.infusion_duration]
-    )
-    oral = table.oral_time[None, :] + kin.tlag[:, :, 0]
+    fixed = np.concatenate([table.bolus_time, table.infusion_time, table.infusion_end])
+    oral = _oral_start(kin, table, slice(None))[:, :, 0]
     rows = kin.rows
     return np.concatenate(
         [np.broadcast_to(fixed, (rows, fixed.size)), np.broadcast_to(oral, (rows, oral.shape[1]))],
