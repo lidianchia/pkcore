@@ -12,9 +12,11 @@ such a model return one row per draw.
 from dataclasses import dataclass
 from typing import TypeAlias
 
+import numpy as np
 import numpy.typing as npt
 
 from pkcore import _validation
+from pkcore._disposition import two_compartment_modes
 from pkcore._types import FloatArray
 
 
@@ -56,6 +58,8 @@ class OneCompartment:
             "tlag": _validation.parameter("tlag", tlag, minimum=0.0, strict=False),
         }
         _initialise(self, values)
+        with np.errstate(all="ignore"):
+            _check_rate("cl / v", self.cl / self.v)
 
     @property
     def n_draws(self) -> int | None:
@@ -114,6 +118,13 @@ class TwoCompartment:
             "tlag": _validation.parameter("tlag", tlag, minimum=0.0, strict=False),
         }
         _initialise(self, values)
+        with np.errstate(all="ignore"):
+            _check_rate("cl / v1", self.cl / self.v1)
+            _check_rate("q / v1", self.q / self.v1)
+            _check_rate("q / v2", self.q / self.v2)
+            slow, fast, _, _ = two_compartment_modes(self.cl, self.v1, self.q, self.v2)
+            _check_rate("the slower disposition rate constant", slow)
+            _check_rate("the faster disposition rate constant", fast)
 
     @property
     def n_draws(self) -> int | None:
@@ -127,6 +138,21 @@ Model: TypeAlias = OneCompartment | TwoCompartment
 
 def _positive(name: str, value: npt.ArrayLike) -> FloatArray:
     return _validation.parameter(name, value, minimum=0.0, strict=True)
+
+
+_SMALLEST_RATE = float(np.finfo(np.float64).tiny)
+
+
+def _check_rate(name: str, rate: FloatArray) -> None:
+    """Derived rate constants must be finite normal floating-point numbers."""
+    bad = ~(np.isfinite(rate) & (rate >= _SMALLEST_RATE))
+    if bad.any():
+        value = float(np.asarray(rate).reshape(-1)[np.flatnonzero(bad)[0]])
+        raise ValueError(
+            f"{name} must be a finite rate constant >= {_SMALLEST_RATE:.3g} per hour, got "
+            f"{value!r}: the parameter values are too large or too small to be combined "
+            "in floating point"
+        )
 
 
 def _initialise(model: object, values: dict[str, FloatArray | None]) -> None:

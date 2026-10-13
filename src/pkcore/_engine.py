@@ -69,18 +69,26 @@ def prepare(model: Model, doses: Iterable[Dose]) -> tuple[Kinetics, DoseTable]:
 
     infusion_time = column(Route.IV_INFUSION, "time")
     infusion_duration = column(Route.IV_INFUSION, "duration")
+    with np.errstate(all="ignore"):
+        infusion_end = infusion_time + infusion_duration
+    if not np.isfinite(infusion_end).all():
+        raise ValueError("an infusion end time (time + duration) is not finite")
     table = DoseTable(
         bolus_time=column(Route.IV_BOLUS, "time"),
         bolus_amount=column(Route.IV_BOLUS, "amount"),
         infusion_time=infusion_time,
         infusion_amount=column(Route.IV_INFUSION, "amount"),
         infusion_duration=infusion_duration,
-        infusion_end=infusion_time + infusion_duration,
+        infusion_end=infusion_end,
         oral_time=column(Route.ORAL, "time"),
         oral_amount=column(Route.ORAL, "amount"),
     )
     if table.oral_time.size and kin.ka is None:
         raise ValueError("oral doses need a model with an absorption rate constant (ka)")
+    with np.errstate(all="ignore"):
+        oral_start = _oral_start(kin, table, slice(None))
+    if not np.isfinite(oral_start).all():
+        raise ValueError("an oral input time (time + tlag) is not finite")
     return kin, table
 
 
@@ -207,6 +215,64 @@ def central_slope(kin: Kinetics, table: DoseTable, t: FloatArray, side: Side) ->
     )
 
 
+def central_bend(kin: Kinetics, table: DoseTable, t: FloatArray, side: Side) -> FloatArray:
+    """``A'' + lambda1 A'`` for the central amount ``A``; one-sided at event times.
+
+    This is ``exp(-lambda1 t) d/dt (exp(lambda1 t) A'(t))``. Between two events ``A'`` is
+    a combination of at most three exponentials (rates ``lambda1``, ``lambda2``, ``ka``),
+    so it has at most two zeros there, and by Rolle's theorem the expression above
+    vanishes between any two of them. The ``lambda1`` terms cancel exactly, so it is a
+    combination of at most two exponentials and changes sign at most once between two
+    events. The metrics use this to separate the critical points of ``A``.
+    """
+    rows, columns, modes = _dims(kin, t)
+    slowest = kin.rates[0]
+
+    def bolus(s: slice) -> FloatArray:
+        tau = t - table.bolus_time[None, s, None]
+        given = _given(tau, side)
+        elapsed = np.where(given, tau, 0.0)
+        response = _modal(kin, lambda rate: rate * (rate - slowest) * np.exp(-rate * elapsed))
+        return np.where(given, table.bolus_amount[None, s, None] * response, 0.0)
+
+    def infusion(s: slice) -> FloatArray:
+        duration = table.infusion_duration[None, s, None]
+        tau = t - table.infusion_time[None, s, None]
+        to_end = t - table.infusion_end[None, s, None]
+        started = _given(tau, side)
+        ended = _given(to_end, side)
+        running = np.clip(tau, 0.0, duration)
+        after = np.maximum(to_end, 0.0)
+        rate_in = table.infusion_amount[None, s, None] / duration
+        up = _modal(kin, lambda rate: -(rate - slowest) * np.exp(-rate * running))
+        down = _modal(
+            kin,
+            lambda rate: rate * (rate - slowest) * e1(rate, duration) * np.exp(-rate * after),
+        )
+        return rate_in * (_masked(started & ~ended, up) + _masked(ended, down))
+
+    def oral(s: slice) -> FloatArray:
+        ka = _absorption(kin)
+        tau = t - _oral_start(kin, table, s)
+        given = _given(tau, side)
+        elapsed = np.where(given, tau, 0.0)
+        absorbed = kin.f * table.oral_amount[None, s, None] * ka
+        response = _modal(
+            kin,
+            lambda rate: (
+                rate * (rate - slowest) * dd(rate, ka, elapsed)
+                - (ka + (rate - slowest)) * np.exp(-ka * elapsed)
+            ),
+        )
+        return np.where(given, absorbed * response, 0.0)
+
+    return (
+        _accumulate(table.bolus_time.size, rows, columns, modes, bolus)
+        + _accumulate(table.infusion_time.size, rows, columns, modes, infusion)
+        + _accumulate(table.oral_time.size, rows, columns, modes, oral)
+    )
+
+
 def peripheral_amount(kin: Kinetics, table: DoseTable, t: FloatArray) -> FloatArray:
     """Amount in the peripheral compartment (zero for one-compartment models)."""
     rows, columns, modes = _dims(kin, t)
@@ -266,16 +332,18 @@ def central_integral(kin: Kinetics, table: DoseTable, t1: FloatArray, t2: FloatA
     ``[a, a + w]`` after the start of an input, the response is split into the part
     already in the system at ``a`` (which decays) and the input still to come, e.g.
     ``dd(r, ka, a + s) = exp(-r s) dd(r, ka, a) + exp(-ka a) dd(r, ka, s)``, so every
-    term is non-negative and short intervals keep full relative accuracy.
+    term is non-negative. Interval widths are differences of the original bounds,
+    e.g. ``max(t2, t0) - max(t1, t0)`` for an input starting at ``t0``, which is exact
+    for nearby bounds (Sterbenz), so short intervals keep full relative accuracy.
     """
     rows = max(kin.rows, int(t1.shape[0]), int(t2.shape[0]))
     columns = max(int(t1.shape[2]), int(t2.shape[2]))
     modes = len(kin.rates) + 1
 
     def bolus(s: slice) -> FloatArray:
-        start = np.maximum(t1 - table.bolus_time[None, s, None], 0.0)
-        stop = np.maximum(t2 - table.bolus_time[None, s, None], 0.0)
-        width = stop - start
+        begin = table.bolus_time[None, s, None]
+        start = np.maximum(t1 - begin, 0.0)
+        width = np.maximum(t2, begin) - np.maximum(t1, begin)
         response = _modal(kin, lambda rate: np.exp(-rate * start) * e1(rate, width))
         return table.bolus_amount[None, s, None] * response
 
@@ -284,9 +352,9 @@ def central_integral(kin: Kinetics, table: DoseTable, t1: FloatArray, t2: FloatA
         begin = table.infusion_time[None, s, None]
         end = table.infusion_end[None, s, None]
         run_start = np.clip(t1 - begin, 0.0, duration)
-        run_width = np.clip(t2 - begin, 0.0, duration) - run_start
+        run_width = np.clip(t2, begin, end) - np.clip(t1, begin, end)
         after_start = np.maximum(t1 - end, 0.0)
-        after_width = np.maximum(t2 - end, 0.0) - after_start
+        after_width = np.maximum(t2, end) - np.maximum(t1, end)
         rate_in = table.infusion_amount[None, s, None] / duration
         zero = np.zeros_like(duration)
 
@@ -303,7 +371,7 @@ def central_integral(kin: Kinetics, table: DoseTable, t1: FloatArray, t2: FloatA
         ka = _absorption(kin)
         begin = _oral_start(kin, table, s)
         start = np.maximum(t1 - begin, 0.0)
-        width = np.maximum(t2 - begin, 0.0) - start
+        width = np.maximum(t2, begin) - np.maximum(t1, begin)
         absorbed = kin.f * table.oral_amount[None, s, None] * ka
         response = _modal(
             kin,

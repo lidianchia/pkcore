@@ -2,15 +2,15 @@
 
 Every metric has the draw shape of the model: a 0-d array for scalar parameters,
 shape ``(n,)`` for ``n`` parameter draws. All metrics use the same closed forms as
-:func:`pkcore.concentration`. AUC and troughs are exact; Cmax and Cmin are located on
-a dense grid and then refined with the analytic derivative (see :func:`cmax`).
+:func:`pkcore.concentration`. AUC and troughs are analytic (exact up to rounding);
+Cmax and Cmin are located by bracketing every critical point of ``C`` between events
+and refining it with the analytic derivative (see :func:`cmax`).
 """
 
 import math
-import operator
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import SupportsIndex
+from typing import NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -20,6 +20,7 @@ from pkcore._engine import (
     DoseTable,
     Side,
     central_amount,
+    central_bend,
     central_integral,
     central_slope,
     event_times,
@@ -32,8 +33,8 @@ from pkcore.doses import Dose
 from pkcore.models import Model
 
 _MAX_REFINEMENTS = 400
-_RESOLUTION = 4.0 * float(np.finfo(np.float64).eps)
-_WINDOW_TOLERANCE = 1e-12
+_RESOLUTION = 8.0 * float(np.finfo(np.float64).eps)
+_NOISE_FLOOR = 1e-280
 _LN2 = math.log(2.0)
 
 
@@ -88,46 +89,38 @@ class Extremum:
     time: FloatArray
 
 
-def cmax(
-    model: Model,
-    doses: Iterable[Dose],
-    start: float,
-    end: float,
-    *,
-    grid_points: SupportsIndex = 1001,
-) -> Extremum:
+def cmax(model: Model, doses: Iterable[Dose], start: float, end: float) -> Extremum:
     """Return the maximum of ``C(t)`` over the closed window ``[start, end]`` and its time.
 
     Cmax is ``max C(t)`` (attained, because ``C`` is right-continuous with upward
     jumps only); Tmax is the earliest time at which it is attained.
 
-    Method: ``C`` is evaluated on a grid of ``grid_points`` equally spaced times plus
-    every event time in the window (bolus times, infusion starts and ends,
-    lag-shifted oral dose times), so that ``C`` is smooth between neighbouring grid
-    points. Every grid interval in which the analytic derivative changes sign from
-    + to - is refined by root finding on the derivative (Illinois regula falsi with
-    interleaved bisection, always keeping a bracket); the candidate with the largest
-    value wins.
+    Method (no sampling grid): the maximum lies at ``start``, ``end``, an event time
+    (bolus, infusion start or end, lag-shifted oral dose) or a zero of ``C'`` between
+    two events. There ``C'`` is a combination of at most three exponentials (rates
+    ``lambda1``, ``lambda2``, ``ka``) and has at most two zeros, and the reduced
+    derivative ``C'' + lambda1 C'`` changes sign at most once, between them (Rolle's
+    theorem). Each interval between events is split where that sign change is
+    (located by root finding); on each piece ``C'`` then has at most one zero, so the
+    signs of ``C'`` at the two ends decide whether the piece contains a maximum, which
+    is then located by root finding on ``C'`` (Illinois regula falsi interleaved with
+    bisection, always bracketing). Derivative values below ``1e-280`` times the dose
+    scale count as zero (near underflow their sign is unreliable).
 
-    Precision: the refinement stops when the bracket is narrower than
-    ``1e-12 * (end - start)`` (or a few units in the last place of ``t``); in tests
-    Tmax agrees with the closed form to better than 1e-11 relative. Cmax is evaluated
-    at Tmax, and a Tmax error ``d`` changes ``C`` only by ``O(d^2)``, so Cmax is
-    accurate to rounding error (about 1e-14 relative). This holds provided that no
-    grid interval contains two local extrema; increase ``grid_points`` for curves
-    with features narrower than ``(end - start) / grid_points``.
+    Precision: root finding stops when the bracket is at most 8 units in the last
+    place of ``t`` wide. Tmax is then exact up to the band around the true Tmax in
+    which rounding makes the sign of the computed ``C'`` unreliable, roughly
+    ``eps * S / |C''(Tmax)|`` with ``S`` the sum of the magnitudes of the terms of
+    ``C'`` (against closed forms, Tmax agreed to about 1e-15 relative).
+    Cmax is evaluated at Tmax, and a Tmax error ``d`` changes ``C`` only by
+    ``O(C'' d^2)``, so Cmax is accurate to rounding error. Two extrema closer together
+    than that rounding band cannot be separated; Cmax is then still correct to
+    rounding level.
     """
-    return _extremum(model, doses, (start, end), grid_points, maximum=True)
+    return _extremum(model, doses, (start, end), maximum=True)
 
 
-def cmin(
-    model: Model,
-    doses: Iterable[Dose],
-    start: float,
-    end: float,
-    *,
-    grid_points: SupportsIndex = 1001,
-) -> Extremum:
+def cmin(model: Model, doses: Iterable[Dose], start: float, end: float) -> Extremum:
     """Return the infimum of ``C(t)`` over the closed window ``[start, end]`` and its time.
 
     Because ``C`` jumps up at IV bolus times, the infimum may be a left limit: a bolus
@@ -136,7 +129,7 @@ def cmin(
     given time use :func:`trough`. Method and precision as for :func:`cmax`, with the
     derivative changing sign from - to +; ties resolve to the earliest time.
     """
-    return _extremum(model, doses, (start, end), grid_points, maximum=False)
+    return _extremum(model, doses, (start, end), maximum=False)
 
 
 def terminal_rate(model: Model) -> FloatArray:
@@ -173,72 +166,69 @@ def apparent_oral_terminal_half_life(model: Model) -> FloatArray:
 
 
 def _extremum(
-    model: Model,
-    doses: Iterable[Dose],
-    window: tuple[float, float],
-    grid_points: SupportsIndex,
-    *,
-    maximum: bool,
+    model: Model, doses: Iterable[Dose], window: tuple[float, float], *, maximum: bool
 ) -> Extremum:
     kin, table = prepare(model, doses)
-    ta, tb, count = _window(window, grid_points)
+    ta = _validation.real_number("start", window[0])
+    tb = _validation.real_number("end", window[1])
+    if ta > tb:
+        raise ValueError(f"start must be <= end; got [{ta}, {tb}]")
     rows = kin.rows
-    sign = 1.0 if maximum else -1.0
+    what = "Cmax" if maximum else "Cmin"
     with np.errstate(all="ignore"):
-        grid, at_event = _grid(kin, table, ta, tb, count)
+        search = _Search.create(kin, table, maximum=maximum)
+        grid, at_event = _grid(kin, table, ta, tb)
         event_row, event_column = np.nonzero(at_event)
         event_time = grid[event_row, event_column]
+        all_rows = np.broadcast_to(np.arange(rows)[:, None], grid.shape)
 
-        right_value = _evaluate(kin, table, grid, Side.RIGHT, slope=False)
-        right_slope = _evaluate(kin, table, grid, Side.RIGHT, slope=True)
-        left_slope = right_slope.copy()
-        left_slope[event_row, event_column] = _pointwise(
-            kin.take(event_row), table, event_time, Side.LEFT, slope=True
-        )
+        def one_sided(order: int) -> tuple[FloatArray, FloatArray]:
+            right = search.at(all_rows.ravel(), grid.ravel(), Side.RIGHT, order).reshape(grid.shape)
+            left = right.copy()
+            left[event_row, event_column] = search.at(event_row, event_time, Side.LEFT, order)
+            return right, left
 
-        row_index = np.broadcast_to(np.arange(rows)[:, None], grid.shape)
-        candidate_row = [row_index.ravel()]
-        candidate_value = [right_value.ravel()]
+        value = _evaluate(kin, table, grid, Side.RIGHT, 0)
+        slope_right, slope_left = one_sided(1)
+        bend_right, bend_left = one_sided(2)
+
+        candidate_row = [all_rows.ravel()]
+        candidate_value = [value.ravel()]
         candidate_time = [grid.ravel()]
         if not maximum:
             inside = event_time > ta
             candidate_row.append(event_row[inside])
-            candidate_value.append(
-                _pointwise(
-                    kin.take(event_row[inside]), table, event_time[inside], Side.LEFT, slope=False
-                )
-            )
+            candidate_value.append(search.at(event_row[inside], event_time[inside], Side.LEFT, 0))
             candidate_time.append(event_time[inside])
 
-        # Grid intervals in which sign * dC/dt changes from + to - contain a local
-        # maximum of sign * C; C is smooth inside every interval.
-        turning = (sign * right_slope[:, :-1] > 0.0) & (sign * left_slope[:, 1:] < 0.0)
-        flagged_row, flagged_column = np.nonzero(turning)
-        if flagged_row.size:
-            flagged = kin.take(flagged_row)
+        intervals = _Intervals(
+            row=np.repeat(np.arange(rows), grid.shape[1] - 1),
+            lo=grid[:, :-1].ravel(),
+            hi=grid[:, 1:].ravel(),
+            g_lo=slope_right[:, :-1].ravel(),
+            g_hi=slope_left[:, 1:].ravel(),
+        )
+        bends = (bend_right[:, :-1].ravel(), bend_left[:, 1:].ravel())
+        piece_row, lo, hi, g_lo, g_hi = _split(search, intervals, bends)
+        # On each piece sign * C' has at most one zero: a change from + to <= 0 brackets a
+        # local maximum of sign * C.
+        turning = (g_lo > 0.0) & (g_hi <= 0.0) & (hi > lo)
+        if turning.any():
+            chosen = np.nonzero(turning)[0]
+            critical_row = piece_row[chosen]
 
-            def g(x: FloatArray) -> FloatArray:
-                return sign * _pointwise(flagged, table, x, Side.RIGHT, slope=True)
+            def slope(x: FloatArray, index: IndexArray) -> FloatArray:
+                return search.at(critical_row[index], x, Side.RIGHT, 1)
 
-            refined_time = _refine(
-                g,
-                (grid[flagged_row, flagged_column], grid[flagged_row, flagged_column + 1]),
-                (
-                    sign * right_slope[flagged_row, flagged_column],
-                    sign * left_slope[flagged_row, flagged_column + 1],
-                ),
-                _WINDOW_TOLERANCE * (tb - ta),
-            )
-            candidate_row.append(flagged_row)
-            candidate_value.append(
-                _pointwise(flagged, table, refined_time, Side.RIGHT, slope=False)
-            )
-            candidate_time.append(refined_time)
+            critical = _refine(slope, (lo[chosen], hi[chosen]), (g_lo[chosen], g_hi[chosen]))
+            candidate_row.append(critical_row)
+            candidate_value.append(search.at(critical_row, critical, Side.RIGHT, 0))
+            candidate_time.append(critical)
+
         values = np.concatenate(candidate_value)
-        what = "Cmax" if maximum else "Cmin"
         if not np.isfinite(values).all():
             raise FloatingPointError(f"{what} candidates are not finite (overflow)")
-        value, time = _best(
+        best_value, best_time = _best(
             np.concatenate(candidate_row),
             values,
             np.concatenate(candidate_time),
@@ -246,45 +236,64 @@ def _extremum(
             maximum=maximum,
         )
     return Extremum(
-        value=finish(value[:, None], kin, (), what),
-        time=finish(time[:, None], kin, (), f"time of {what}"),
+        value=finish(best_value[:, None], kin, (), what),
+        time=finish(best_time[:, None], kin, (), f"time of {what}"),
     )
 
 
-def _window(window: tuple[float, float], grid_points: SupportsIndex) -> tuple[float, float, int]:
-    ta = _validation.real_number("start", window[0])
-    tb = _validation.real_number("end", window[1])
-    if ta > tb:
-        raise ValueError(f"start must be <= end; got [{ta}, {tb}]")
-    if isinstance(grid_points, bool | np.bool_):
-        raise TypeError("grid_points must be an int")
-    try:
-        count = operator.index(grid_points)
-    except TypeError:
-        raise TypeError("grid_points must be an int") from None
-    if count < 2:
-        raise ValueError("grid_points must be >= 2")
-    return ta, tb, count
+@dataclass(frozen=True, eq=False)
+class _Search:
+    """Point evaluations for the extremum search.
+
+    ``at(rows, times, side, order)`` returns ``C`` (order 0), ``sign * C'`` (order 1) or
+    ``C'' + lambda1 C'`` (order 2) for row ``rows[i]`` at ``times[i]``. Derivative values
+    whose magnitude is below ``_NOISE_FLOOR`` times the row's scale (dose amount over
+    ``v1`` times the largest rate constant, to the power of the order) are set to
+    zero: so close to underflow their sign is not reliable, and they correspond to a
+    curve that is zero for all practical purposes.
+    """
+
+    kin: Kinetics
+    table: DoseTable
+    sign: float
+    floors: tuple[FloatArray, FloatArray]
+
+    @classmethod
+    def create(cls, kin: Kinetics, table: DoseTable, *, maximum: bool) -> "_Search":
+        amount = (
+            table.bolus_amount.sum()
+            + table.infusion_amount.sum()
+            + kin.f[:, 0, 0] * table.oral_amount.sum()
+        ) / kin.v1[:, 0, 0]
+        fastest = kin.rates[-1][:, 0, 0]
+        if kin.ka is not None and table.oral_amount.size:
+            fastest = np.maximum(fastest, kin.ka[:, 0, 0])
+        floors = (_NOISE_FLOOR * amount * fastest, _NOISE_FLOOR * amount * fastest * fastest)
+        return cls(kin=kin, table=table, sign=1.0 if maximum else -1.0, floors=floors)
+
+    def at(self, rows: IndexArray, times: FloatArray, side: Side, order: int) -> FloatArray:
+        values = _pointwise(self.kin.take(rows), self.table, times, side, order)
+        if order == 0:
+            return values
+        floor = self.floors[order - 1][rows]
+        flushed = np.where(np.abs(values) < floor, 0.0, values)
+        return self.sign * flushed if order == 1 else flushed
 
 
-def _grid(
-    kin: Kinetics, table: DoseTable, ta: float, tb: float, count: int
-) -> tuple[FloatArray, BoolArray]:
-    """Sorted per-row grid on [ta, tb] and a mask of the points that are event times.
+def _grid(kin: Kinetics, table: DoseTable, ta: float, tb: float) -> tuple[FloatArray, BoolArray]:
+    """Sorted per-row points ``ta``, ``tb`` and every event time in ``(ta, tb]``.
 
-    The grid holds ``count`` equally spaced points plus every event time in
-    ``(ta, tb]`` (other events are moved onto ``ta``, where duplicates are harmless;
-    an event at ``tb`` matters through its left limit). Left limits differ from right
-    values only at event times, so a grid point is marked if any entry with the same
-    time is an event.
+    Other events are moved onto ``ta``, where duplicates are harmless; an event at
+    ``tb`` matters through its left limit. Left limits differ from right values only
+    at event times, so a point is marked if any entry with the same time is an event.
     """
     events = event_times(kin, table)
     events = np.where((events > ta) & (events <= tb), events, ta)
-    base = np.broadcast_to(np.linspace(ta, tb, count), (kin.rows, count))
-    combined = np.concatenate([base, events], axis=1)
+    ends = np.broadcast_to(np.array([ta, tb]), (kin.rows, 2))
+    combined = np.concatenate([ends, events], axis=1)
     order = np.argsort(combined, axis=1, kind="stable")
     grid = np.take_along_axis(combined, order, axis=1)
-    return grid, _shares_time_with_event(grid, order >= count)
+    return grid, _shares_time_with_event(grid, order >= 2)
 
 
 def _shares_time_with_event(grid: FloatArray, is_event: BoolArray) -> BoolArray:
@@ -297,65 +306,118 @@ def _shares_time_with_event(grid: FloatArray, is_event: BoolArray) -> BoolArray:
     return np.asarray(counts[run] > 0.0, dtype=np.bool_)
 
 
+class _Intervals(NamedTuple):
+    """Flat per-interval data: row, ends and ``sign * C'`` just inside both ends."""
+
+    row: IndexArray
+    lo: FloatArray
+    hi: FloatArray
+    g_lo: FloatArray
+    g_hi: FloatArray
+
+
+def _split(
+    search: _Search, intervals: _Intervals, bends: tuple[FloatArray, FloatArray]
+) -> _Intervals:
+    """Split every interval where the reduced derivative ``C'' + lambda1 C'`` changes sign.
+
+    ``bends`` holds the reduced derivative just inside both ends of each interval. On
+    the resulting pieces ``C'`` has at most one zero. A value that is zero (in practice
+    below the noise floor, near underflow) counts as a change of sign, so the split
+    then lands at the boundary of the region where the sign is known; extra splits are
+    harmless.
+    """
+    row, lo, hi, g_lo, g_hi = intervals
+    bend_lo, bend_hi = bends
+    split = (bend_lo != 0.0) & (np.sign(bend_hi) != np.sign(bend_lo)) & (hi > lo)
+    if not split.any():
+        return intervals
+    chosen = np.nonzero(split)[0]
+    orientation = np.sign(bend_lo[chosen])
+    split_row = row[chosen]
+
+    def bend(x: FloatArray, index: IndexArray) -> FloatArray:
+        return orientation[index] * search.at(split_row[index], x, Side.RIGHT, 2)
+
+    middle = _refine(
+        bend,
+        (lo[chosen], hi[chosen]),
+        (orientation * bend_lo[chosen], orientation * bend_hi[chosen]),
+    )
+    g_middle = search.at(split_row, middle, Side.RIGHT, 1)
+    keep = np.nonzero(~split)[0]
+    return _Intervals(
+        row=np.concatenate([row[keep], split_row, split_row]),
+        lo=np.concatenate([lo[keep], lo[chosen], middle]),
+        hi=np.concatenate([hi[keep], middle, hi[chosen]]),
+        g_lo=np.concatenate([g_lo[keep], g_lo[chosen], g_middle]),
+        g_hi=np.concatenate([g_hi[keep], g_middle, g_hi[chosen]]),
+    )
+
+
 def _evaluate(
-    kin: Kinetics, table: DoseTable, times: FloatArray, side: Side, *, slope: bool
+    kin: Kinetics, table: DoseTable, times: FloatArray, side: Side, order: int
 ) -> FloatArray:
-    """Concentration or its time derivative at per-row times of shape (rows, n)."""
+    """``C``, ``C'`` or ``C'' + lambda1 C'`` (``order`` 0, 1, 2) at per-row times (rows, n)."""
     t = times[:, None, :]
-    amount = central_slope(kin, table, t, side) if slope else central_amount(kin, table, t, side)
+    if order == 0:
+        amount = central_amount(kin, table, t, side)
+    elif order == 1:
+        amount = central_slope(kin, table, t, side)
+    else:
+        amount = central_bend(kin, table, t, side)
     return amount / kin.v1[:, :, 0]
 
 
 def _pointwise(
-    kin: Kinetics, table: DoseTable, times: FloatArray, side: Side, *, slope: bool
+    kin: Kinetics, table: DoseTable, times: FloatArray, side: Side, order: int
 ) -> FloatArray:
-    """Concentration or its time derivative at ``times[i]`` for row ``i`` of ``kin``."""
-    return _evaluate(kin, table, times[:, None], side, slope=slope)[:, 0]
+    """Like :func:`_evaluate` at ``times[i]`` for row ``i`` of ``kin``."""
+    return _evaluate(kin, table, times[:, None], side, order)[:, 0]
 
 
 def _refine(
-    g: Callable[[FloatArray], FloatArray],
+    g: Callable[[FloatArray, IndexArray], FloatArray],
     bracket: tuple[FloatArray, FloatArray],
     values: tuple[FloatArray, FloatArray],
-    tolerance: float,
 ) -> FloatArray:
-    """Locate a sign change of ``g`` from + to - inside each bracket ``[lo, hi]``.
+    """Locate the change of ``g`` from ``> 0`` to ``<= 0`` inside each bracket ``[lo, hi]``.
 
-    ``values`` holds ``g`` just inside both ends (positive at ``lo``, negative at
-    ``hi``). Uses the Illinois variant of regula falsi, with a bisection step every
-    fourth iteration so that each bracket at least halves every four steps, and stops
-    once every bracket is narrower than ``tolerance`` or a few units in the last place
-    of its end points.
+    ``g(x, index)`` evaluates the function of the brackets ``index`` at ``x``;
+    ``values`` holds it just inside both ends (``> 0`` at ``lo``, ``<= 0`` at ``hi``).
+    Uses the Illinois variant of regula falsi with a bisection step every fourth
+    iteration, so that each bracket at least halves every four steps, and stops
+    refining a bracket once it is at most 8 units in the last place of its ends wide.
     """
-    lo, hi = bracket
-    g_lo, g_hi = values
+    lo, hi = bracket[0].copy(), bracket[1].copy()
+    g_lo, g_hi = values[0].copy(), values[1].copy()
     last_moved_lo = np.zeros(lo.shape, dtype=bool)
     last_moved_hi = np.zeros(lo.shape, dtype=bool)
     for iteration in range(_MAX_REFINEMENTS):
         width = hi - lo
-        active = width > np.maximum(tolerance, _RESOLUTION * np.maximum(np.abs(lo), np.abs(hi)))
-        if not active.any():
+        active = np.nonzero(width > _RESOLUTION * np.maximum(np.abs(lo), np.abs(hi)))[0]
+        if active.size == 0:
             break
-        middle = 0.5 * (lo + hi)
+        a_lo, a_hi, a_width = lo[active], hi[active], width[active]
+        middle = 0.5 * (a_lo + a_hi)
         if iteration % 4 == 3:
             x = middle
         else:
-            x = lo + width * (g_lo / (g_lo - g_hi))
-            x = np.where((x > lo) & (x < hi), x, middle)
-        gx = g(x)
-        move_lo = active & (gx > 0.0)
-        move_hi = active & (gx < 0.0)
-        root = active & (gx == 0.0)
-        lo = np.where(move_lo | root, x, lo)
-        hi = np.where(move_hi | root, x, hi)
+            x = a_lo + a_width * (g_lo[active] / (g_lo[active] - g_hi[active]))
+            x = np.where((x > a_lo) & (x < a_hi), x, middle)
+        gx = g(x, active)
+        move_lo = gx > 0.0
+        move_hi = ~move_lo
         # Illinois: when the same end moves twice in a row, halve the value kept at the
-        # other end so that the next secant point falls on the other side of the root.
-        g_hi = np.where(move_lo & last_moved_lo, 0.5 * g_hi, g_hi)
-        g_lo = np.where(move_hi & last_moved_hi, 0.5 * g_lo, g_lo)
-        g_lo = np.where(move_lo, gx, g_lo)
-        g_hi = np.where(move_hi, gx, g_hi)
-        last_moved_lo = np.where(active, move_lo, last_moved_lo)
-        last_moved_hi = np.where(active, move_hi, last_moved_hi)
+        # other end so that the next secant point falls on the other side of the change.
+        g_hi[active] = np.where(move_lo & last_moved_lo[active], 0.5 * g_hi[active], g_hi[active])
+        g_lo[active] = np.where(move_hi & last_moved_hi[active], 0.5 * g_lo[active], g_lo[active])
+        lo[active] = np.where(move_lo, x, a_lo)
+        hi[active] = np.where(move_hi, x, a_hi)
+        g_lo[active] = np.where(move_lo, gx, g_lo[active])
+        g_hi[active] = np.where(move_hi, gx, g_hi[active])
+        last_moved_lo[active] = move_lo
+        last_moved_hi[active] = move_hi
     return 0.5 * (lo + hi)
 
 

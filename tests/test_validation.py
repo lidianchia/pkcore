@@ -171,28 +171,71 @@ def test_auc_rejects_invalid_intervals(
 
 
 @pytest.mark.parametrize("metric", [pk.cmax, pk.cmin])
-def test_extremum_window_and_grid_are_validated(metric: Callable[..., pk.Extremum]) -> None:
+def test_extremum_window_is_validated(metric: Callable[..., pk.Extremum]) -> None:
     model = pk.OneCompartment(cl=1.0, v=10.0)
     with pytest.raises(ValueError, match="start must be <= end"):
         metric(model, BOLUS, 5.0, 1.0)
     with pytest.raises(ValueError, match="end must be finite"):
         metric(model, BOLUS, 0.0, math.inf)
-    with pytest.raises(ValueError, match="grid_points must be >= 2"):
-        metric(model, BOLUS, 0.0, 1.0, grid_points=1)
-    with pytest.raises(TypeError, match="grid_points must be an int"):
-        metric(model, BOLUS, 0.0, 1.0, grid_points=10.0)
+    with pytest.raises(TypeError, match="start must be a real number"):
+        metric(model, BOLUS, "0", 1.0)
 
 
-def test_grid_points_accepts_numpy_integers() -> None:
-    model = pk.OneCompartment(cl=1.0, v=10.0)
-    peak = pk.cmax(model, BOLUS, 0.0, 1.0, grid_points=np.int64(11))
-    assert float(peak.time) == 0.0
+@pytest.mark.parametrize(
+    ("factory", "message"),
+    [
+        (lambda: pk.OneCompartment(cl=1e300, v=1e-300), "cl / v must be a finite rate"),
+        (lambda: pk.OneCompartment(cl=1e-300, v=1e300), "cl / v must be a finite rate"),
+        (lambda: pk.TwoCompartment(1e300, 1e-10, 1.0, 1.0), "cl / v1 must be a finite rate"),
+        (lambda: pk.TwoCompartment(1.0, 1e-300, 1e300, 1.0), "q / v1 must be a finite rate"),
+        (lambda: pk.TwoCompartment(1.0, 1.0, 1e-300, 1e300), "q / v2 must be a finite rate"),
+        (
+            lambda: pk.TwoCompartment(1e-200, 1.0, 1e-200, 1e100),
+            "slower disposition rate constant must be a finite rate",
+        ),
+    ],
+)
+def test_derived_rate_constants_must_be_representable(
+    factory: Callable[[], pk.Model], message: str
+) -> None:
+    # pytest turns warnings into errors here, so this also checks that no numpy
+    # RuntimeWarning escapes from the overflow or underflow.
+    with pytest.raises(ValueError, match=message):
+        factory()
+
+
+def test_event_times_must_be_representable() -> None:
+    model = pk.OneCompartment(cl=1.0, v=1.0, ka=1.0, tlag=1e308)
+    with pytest.raises(ValueError, match="infusion end time"):
+        pk.concentration(model, [Dose(1e308, 1.0, Route.IV_INFUSION, duration=1e308)], [0.0])
+    with pytest.raises(ValueError, match="oral input time"):
+        pk.concentration(model, [Dose(1e308, 1.0, Route.ORAL)], [0.0])
+
+
+def test_negative_zero() -> None:
+    with pytest.raises(ValueError, match=r"Dose\.amount must be >= 0"):
+        Dose(0.0, -0.0, Route.ORAL)
+    model = pk.OneCompartment(cl=1.0, v=1.0, ka=1.0, f=-0.0, tlag=-0.0)
+    assert math.copysign(1.0, float(model.tlag)) == 1.0
+    assert math.copysign(1.0, float(model.f)) == 1.0
+
+
+def test_huge_integers_are_rejected_as_values() -> None:
+    with pytest.raises(ValueError, match=r"Dose\.amount must be finite"):
+        Dose(0.0, 10**400, Route.ORAL)
 
 
 @pytest.mark.parametrize("percentiles", [[101.0], [-1.0], [], [[5.0, 95.0]], [math.nan]])
 def test_percentiles_are_validated(percentiles: Any) -> None:
     model = pk.OneCompartment(cl=[1.0, 2.0], v=10.0)
     with pytest.raises(ValueError, match="percentiles"):
+        pk.percentile_bands(model, BOLUS, [1.0], percentiles)
+
+
+@pytest.mark.parametrize("percentiles", [[True, False], ["50"], [None]])
+def test_percentiles_must_be_numbers(percentiles: Any) -> None:
+    model = pk.OneCompartment(cl=[1.0, 2.0], v=10.0)
+    with pytest.raises(TypeError, match="percentiles must be real numbers"):
         pk.percentile_bands(model, BOLUS, [1.0], percentiles)
 
 

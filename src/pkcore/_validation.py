@@ -21,7 +21,10 @@ def extended_real_number(name: str, value: object) -> float:
     """Return ``value`` as a float that may be infinite but not NaN."""
     if isinstance(value, bool | np.bool_) or not isinstance(value, numbers.Real):
         raise TypeError(f"{name} must be a real number, got {type(value).__name__}")
-    result = float(value)
+    try:
+        result = float(value)
+    except OverflowError:
+        raise ValueError(f"{name} must be finite, got an integer too large for a float") from None
     if math.isnan(result):
         raise ValueError(f"{name} must not be NaN")
     return result
@@ -42,7 +45,7 @@ def parameter(name: str, value: npt.ArrayLike, *, minimum: float, strict: bool) 
         )
     if raw.size == 0:
         raise ValueError(f"{name} must not be empty")
-    array = raw.astype(np.float64, copy=True)
+    array = raw.astype(np.float64, copy=True) + 0.0  # also turns -0.0 into +0.0
     finite = np.isfinite(array)
     above = array > minimum if strict else array >= minimum
     requirement = f"finite and {'>' if strict else '>='} {minimum:g}"

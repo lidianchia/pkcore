@@ -1,7 +1,9 @@
 # Conventions and numerical methods
 
-This document states exactly what pkcore v0.1 computes. Everything here is covered by the
-test suite (see [Verification](#verification)).
+This document states exactly what pkcore v0.1 computes. The conventions, metrics and
+numerical methods below are exercised by the test suite (see [Verification](#verification));
+the units table, the steady-state guidance and the notes on other engines are definitions or
+advice and are not tested.
 
 ## Units
 
@@ -37,8 +39,11 @@ C = A1 / v1
 Oral doses enter a depot that empties into the central compartment at the first-order rate
 `ka`. Elimination is linear and from the central compartment only.
 
-Parameters are validated on construction (`ValueError` otherwise): all finite; `cl`, `v`,
-`v1`, `v2`, `q`, `ka` > 0; `f` in [0, 1]; `tlag` >= 0. Each parameter is a scalar or a 1-D
+Parameters are validated on construction: all finite; `cl`, `v`, `v1`, `v2`, `q`, `ka` > 0;
+`f` in [0, 1]; `tlag` >= 0 (`ValueError` otherwise, `TypeError` for values that are not real
+numbers). The derived rate constants (`cl/v`, or `cl/v1`, `q/v1`, `q/v2` and both disposition
+eigenvalues) must be finite, normal floating-point numbers; otherwise construction fails with
+`ValueError` rather than overflowing or underflowing later. Each parameter is a scalar or a 1-D
 array of parameter draws; all arrays of one model must have the same length `n`. Results
 then have one row per draw: shape `(n,) + times.shape` instead of `times.shape`. Models,
 doses and parameter arrays are immutable.
@@ -52,10 +57,12 @@ doses and parameter arrays are immutable.
   `time + duration` (`duration` > 0 is required);
 - `Route.ORAL`: `f * amount` enters the depot at `time + tlag`.
 
-Validation: `time` finite, `amount` finite and >= 0, `duration` finite and > 0 for infusions
-and absent for the other routes. A dosing history is any iterable of doses: times may be
-irregular, unsorted or negative, infusions may overlap, and several doses may share a time.
-**Missed doses are simply not passed in** (the caller filters them).
+Validation (`ValueError`, or `TypeError` for values that are not real numbers): `time` finite,
+`amount` finite and >= 0 (negative zero is rejected), `duration` finite and > 0 for infusions
+and absent for the other routes; `time + duration` and `time + tlag` must be finite. A dosing
+history is any iterable of doses: times may be irregular, unsorted or negative, infusions may
+overlap, and several doses may share a time. **Missed doses are simply not passed in** (the
+caller filters them).
 
 ## Conventions
 
@@ -70,7 +77,10 @@ irregular, unsorted or negative, infusions may overlap, and several doses may sh
 - **Event times in floating point.** The time at which an oral dose enters the depot is the
   floating-point number `t0 + tlag`, and an infusion ends at `t0 + duration`; every
   comparison (is a time before or after the event?) uses exactly these numbers. For example
-  with `t0 = 0.7` and `tlag = 0.1` the input happens at `0.7999999999999999`.
+  with `t0 = 0.7` and `tlag = 0.1` the input happens at `0.7999999999999999`. The rounding
+  shifts the phase after such an event by at most half a unit in the last place of `t`, which
+  changes `C` by at most about `lambda * ulp(t) / 2` relative (`lambda` the fastest rate
+  constant involved), far below other rounding errors.
 - **Bioavailability.** `f` scales the oral amount. In v0.1 neither `f` nor `tlag` is applied
   to IV boluses or infusions.
 - **Steady state.** There are no steady-state (SS) dose records in v0.1. Simulate enough prior
@@ -97,8 +107,8 @@ pkcore always reports the post-dose value from `concentration` and the pre-dose 
 
 All metrics have the draw shape of the model (`()` or `(n,)`).
 
-- `auc(model, doses, start, end)`: the exact integral of `C` over `[start, end]`; `start` may be
-  `-inf` and `end` may be `+inf`.
+- `auc(model, doses, start, end)`: the integral of `C` over `[start, end]`, analytic and exact
+  up to rounding; `start` may be `-inf` and `end` may be `+inf`.
 - `cmax(model, doses, start, end)`: the maximum of `C` over the closed window and the earliest
   time at which it is attained (attained because `C` only jumps upwards). A bolus at `end` is
   part of `C(end)`.
@@ -115,18 +125,29 @@ All metrics have the draw shape of the model (`()` or `(n,)`).
   model's parameter draws (`numpy.percentile`, linear interpolation). pkcore draws nothing;
   the caller passes parameter draws as arrays.
 
-**Cmax/Tmax and Cmin precision.** `C` is evaluated on `grid_points` (default 1001) equally
-spaced times plus every event time in the window (bolus times, infusion starts and ends,
-lag-shifted oral dose times), so `C` is smooth between neighbouring grid points. Each grid
-interval in which the analytic derivative changes sign (from + to - for a maximum, - to + for
-a minimum) is refined by root finding on the derivative (Illinois regula falsi with
-interleaved bisection, always bracketing) until the bracket is narrower than
-`1e-12 * (end - start)`. Against closed forms, Tmax agreed to better than 1e-11 relative
-(the tests assert 1e-9); Cmax and Cmin are evaluated at the refined time and are accurate to
-rounding error
-(an error `d` in the time changes `C` only by `O(d^2)`). This requires that no grid interval
-contains two local extrema; increase `grid_points` for features narrower than
-`(end - start) / grid_points`.
+**Cmax/Tmax and Cmin method and precision.** No sampling grid is used. An extremum lies at
+`start`, `end`, an event time (bolus, infusion start or end, lag-shifted oral dose) or at a
+zero of `C'` between two events. Between two events `C'` is a combination of at most three
+exponentials (rates `lambda1`, `lambda2`, `ka`), so it has at most two zeros there, and the
+reduced derivative `C'' + lambda1 C'` = `exp(-lambda1 t) (exp(lambda1 t) C')'` has at most one
+sign change, which by Rolle's theorem lies between them. Each interval between events is split
+at that sign change, after which `C'` has at most one zero per piece, so the signs of `C'` at
+the ends of a piece decide whether it holds a maximum (or minimum); that zero is then located
+by root finding on `C'` (Illinois regula falsi interleaved with bisection, always
+bracketing). Derivative values below `1e-280` times the dose scale (total dose over `v1`,
+times the largest rate constant per order of the derivative) are treated as zero, because so
+close to underflow their sign is unreliable; such a zero counts as a change of sign.
+
+Root finding stops when the bracket is at most 8 units in the last place of `t` wide. Tmax is
+then exact up to the band around the true Tmax in which rounding makes the sign of the
+computed `C'` unreliable, roughly `eps * S / |C''(Tmax)|` with `S` the sum of the magnitudes
+of the terms of `C'` (against closed forms, Tmax agreed to about 1e-15 relative; the tests
+assert 1e-12). Cmax and Cmin are evaluated at the located time; an error `d` in the time
+changes `C` only by `O(C'' d^2)`, so they are accurate to rounding error. Remaining
+limitation: two extrema closer together than that rounding band cannot be separated, but
+then the error in Cmax or Cmin is itself at rounding level. Ties between equal computed
+values resolve to the earliest time; peaks that are equal only up to rounding (for example at
+steady state) may be reported at any of their times.
 
 ## Numerical methods
 
@@ -139,8 +160,9 @@ summation itself has no cancellation. There is no ODE solver and no matrix expon
 production path. (SciPy's `expm` loses accuracy for triangular matrices with nearly equal
 diagonal entries, i.e. exactly when `ka` approaches a disposition rate.)
 
-**Two-compartment modes** (micro-constant form of the ADVAN-style solutions; Abuhelwa,
-Foster & Upton 2015). The discriminant is computed in the cancellation-free form
+**Two-compartment modes.** The closed form is the micro-constant form of the ADVAN-style
+solutions (Abuhelwa, Foster & Upton 2015); its cancellation-free evaluation is pkcore's own.
+The discriminant is computed in the form
 `(k10 - k21)^2 + k12 (k12 + 2 k10 + 2 k21)` (strictly positive), `lambda2 = (s + r)/2` and
 `lambda1 = k10 k21 / lambda2` (no subtraction), and the coefficients
 `c1 = (k21 - lambda1)/r`, `c2 = (lambda2 - k21)/r` from whichever of the two gaps has no
@@ -174,9 +196,12 @@ non-negative, and the remaining integrals are `integral_0^w exp(-r s) ds = w psi
 `integral_0^w DD(a, b; s) ds`, a second-order divided difference of the exponential. The
 latter is evaluated with a Taylor series when `max(a, b) w < 1` and with a closed form that
 loses at most about 1.5 bits otherwise (the approach of McCurdy, Ng & Parlett 1984).
-Mass balance (`AUC = eliminated amount / cl`) was not used because `eliminated = input -
-remaining` cancels catastrophically for short intervals; instead, mass balance is tested as an
-identity between the amount formulas and the AUC integrals.
+Interval widths are differences of the original bounds, for example
+`max(t2, t0) - max(t1, t0)` for an input starting at `t0`, which is exact for nearby bounds
+(Sterbenz), so short intervals far from the dose keep full relative accuracy. Mass balance
+(`AUC = eliminated amount / cl`) was not used because `eliminated = input - remaining`
+cancels catastrophically for short intervals; instead, mass balance is tested as an identity
+between the amount formulas and the AUC integrals.
 
 **Compartment amounts.** `amounts(model, doses, times)` returns the depot, central and
 peripheral amounts and the cumulative eliminated amount (`cl` times the AUC since the doses).
@@ -191,23 +216,29 @@ relative precision.
 
 ## Verification
 
-The tests compare the engine with methods that share no code with it:
+Most tests compare the engine with methods that share no code with it:
 
 - numerical integration of the ODEs with `scipy.integrate.solve_ivp` (Radau or LSODA,
   `rtol = 1e-10`, analytic Jacobian), restarted at every event: agreement within
   `rtol = 1e-7` plus `1e-9` of the dose-scaled concentration;
 - exact propagation with `scipy.linalg.expm`, with a Van Loan augmented matrix for infusions
   (Van Loan 1978), only for well-conditioned parameters (`ka` at least 5 % away from the
-  disposition rates): `rtol = 1e-10`;
+  disposition rates): `rtol = 1e-10`; the one-sided first and reduced second derivatives
+  used by the metrics are checked against the ODE right-hand side on these exact states;
 - the textbook formulas evaluated in 60- to 120-digit decimal arithmetic (for `ka` near or
-  equal to a disposition rate, and for the kernels themselves): `rtol` between a few units in
-  the last place and `1e-12`;
-- identities: single-dose AUC0-inf = F·D/CL for every route, linearity in dose, superposition,
-  time-shift invariance (bit-identical on a dyadic time grid), the IV-bolus accumulation ratio
-  `1/(1 - exp(-k tau))`, steady-state AUC over one interval, AUC additivity and mass balance
-  (input = depot + central + peripheral + eliminated);
-- literature closed forms for Tmax and Cmax (single dose, steady state, `ka == k`), and root
-  finding on textbook derivatives.
+  equal to a disposition rate, short AUC intervals, and the kernels themselves): `rtol`
+  between a few units in the last place and `1e-12`;
+- identities with independent expected values: single-dose AUC0-inf = F·D/CL for every
+  route, the IV-bolus accumulation ratio `1/(1 - exp(-k tau))`, steady-state AUC over one
+  interval, and mass balance (input = depot + central + peripheral + eliminated);
+- literature closed forms for Tmax and Cmax (single dose, steady state, `ka == k`), root
+  finding on textbook and reference derivatives, and textbook limits for extreme parameters.
+
+Consistency checks compare pkcore results with each other: linearity in dose,
+superposition, time-shift invariance (bit-identical on a dyadic time grid), AUC additivity,
+drug independence (bit-identical results whatever else is simulated, also concurrently),
+vectorised against per-draw simulations, and extrema against densely sampled concentrations.
+They cannot detect errors that respect the identity being checked.
 
 Property-based tests (Hypothesis) draw random parameters and random dosing histories; CI uses
 a derandomized profile. Not yet covered: cross-engine golden tests against rxode2 and

@@ -5,9 +5,10 @@ Tmax of the one-compartment oral model, Garrett's limit for ka == k), from root
 finding with ``scipy.optimize.brentq`` on the textbook derivative, from LAPACK
 eigenvalues, and from the matrix-exponential reference evaluated on dense grids.
 
-Tolerances: Tmax ``rtol = 1e-9`` (the refinement stops at 1e-12 of the window, and
-the computed derivative is dominated by rounding within about 1e-11 relative of the
-optimum); Cmax ``rtol = 1e-13`` (an error d in Tmax changes C only by O(d^2)).
+Tolerances: Tmax ``rtol = 1e-12`` (root finding narrows the bracket to a few units in
+the last place; what remains is the band in which rounding makes the sign of the
+computed derivative unreliable, observed up to about 1e-15 relative); Cmax
+``rtol = 1e-13`` (an error d in Tmax changes C only by O(d^2)).
 """
 
 import math
@@ -15,15 +16,30 @@ import math
 import numpy as np
 import pytest
 from hypothesis import assume, given
+from hypothesis import strategies as st
 from scipy.optimize import brentq
 
 import pkcore as pk
-from pk_strategies import EXPM_ATOL, EXPM_RTOL, concentration_scale, doses, model_of, parameters
+from pk_strategies import (
+    EXPM_ATOL,
+    EXPM_RTOL,
+    concentration_scale,
+    doses,
+    log_uniform,
+    model_of,
+    parameters,
+)
 from pkcore import Dose, Route
-from reference import Parameters, concentration_slopes, expm_solution, well_conditioned
+from reference import (
+    Parameters,
+    concentration_derivatives,
+    concentration_slopes,
+    expm_solution,
+    well_conditioned,
+)
 
 DOSE = 100.0
-TMAX_RTOL = 1e-9
+TMAX_RTOL = 1e-12
 CMAX_RTOL = 1e-13
 
 
@@ -43,19 +59,72 @@ def test_single_oral_dose_peak_matches_closed_form(ka: float, k: float) -> None:
 
 
 @pytest.mark.parametrize(
-    ("dose_time", "ka", "end", "grid_points"),
-    [(0.7, 5.0, 2000.0, 1001), (0.7, 8.0, 72.0, 101), (8.7, 8.0, 72.0, 101), (0.7, 8.0, 72.0, 2)],
+    ("dose_time", "ka", "end"), [(0.7, 5.0, 2000.0), (0.7, 8.0, 72.0), (8.7, 8.0, 72.0)]
 )
 def test_peak_after_a_lag_that_is_not_exactly_representable(
-    dose_time: float, ka: float, end: float, grid_points: int
+    dose_time: float, ka: float, end: float
 ) -> None:
     """Absorption starts at fl(time + tlag) = 0.7999999999999999 for time 0.7, tlag 0.1."""
     k, v, tlag = 0.1, 20.0, 0.1
     model = pk.OneCompartment(k * v, v, ka=ka, tlag=tlag)
-    peak = pk.cmax(model, [Dose(dose_time, DOSE, Route.ORAL)], 0.0, end, grid_points=grid_points)
+    peak = pk.cmax(model, [Dose(dose_time, DOSE, Route.ORAL)], 0.0, end)
     t_peak = math.log(ka / k) / (ka - k)
     np.testing.assert_allclose(float(peak.time), dose_time + tlag + t_peak, rtol=TMAX_RTOL)
     np.testing.assert_allclose(float(peak.value), DOSE / v * math.exp(-k * t_peak), rtol=CMAX_RTOL)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        # (cl, v, ka, f, tlag, dose time, window end)
+        (20.0, 20.0, 2.0, 1.0, 0.0, 0.0, 1000.0),
+        (380.0, 20.0, 20.0, 0.7, 2.0, 100.0, 1e5),
+        # flip-flop: C' underflows to exactly zero before C'' + k C' does
+        (100.0, 20.0, 0.5, 1.0, 0.0, 0.0, 5000.0),
+    ],
+)
+def test_peak_in_a_window_much_longer_than_the_curve(
+    case: tuple[float, float, float, float, float, float, float],
+) -> None:
+    """Long before the window ends C and C' underflow to exactly zero.
+
+    Regression: a zero derivative at the far end of an interval was not treated as
+    a sign change, so Cmax came out as 0.
+    """
+    cl, v, ka, f, tlag, dose_time, end = case
+    k = cl / v
+    model = pk.OneCompartment(cl, v, ka=ka, f=f, tlag=tlag)
+    peak = pk.cmax(model, [Dose(dose_time, DOSE, Route.ORAL)], 0.0, end)
+    t_peak = math.log(ka / k) / (ka - k)
+    np.testing.assert_allclose(float(peak.time), dose_time + tlag + t_peak, rtol=TMAX_RTOL)
+    expected = f * DOSE / v * math.exp(-k * t_peak)
+    np.testing.assert_allclose(float(peak.value), expected, rtol=CMAX_RTOL)
+
+
+def test_two_extrema_between_the_same_two_events() -> None:
+    """A small bolus during absorption: C first dips, then rises to the oral peak.
+
+    Both extrema lie between the bolus and the (distant) window end. Regression: with a
+    sampling grid, the peak was missed (15.55 instead of 15.92). Expected values: roots
+    of the reference derivative (matrix exponential and the ODE right-hand side).
+    """
+    p = Parameters(cl=1.0, v1=5.0, q=50.0, v2=50.0, ka=0.5)
+    history = [Dose(0.0, 1000.0, Route.ORAL), Dose(3.5996, 0.2436, Route.IV_BOLUS)]
+    model = model_of(p)
+
+    def reference_slope(t: float) -> float:
+        return float(concentration_derivatives(p, history, [t])["slope_right"][0])
+
+    t_dip = brentq(reference_slope, 3.5996 + 1e-9, 4.5, xtol=1e-15)
+    t_peak = brentq(reference_slope, 4.5, 8.0, xtol=1e-15)
+    assert 3.5996 < t_dip < t_peak
+    peak = pk.cmax(model, history, 3.5986, 5003.5986)
+    np.testing.assert_allclose(float(peak.time), t_peak, rtol=TMAX_RTOL)
+    reference = expm_solution(p, history, [t_dip, t_peak]).concentration
+    np.testing.assert_allclose(float(peak.value), reference[1], rtol=1e-12)
+    low = pk.cmin(model, history, 3.5996, 5.0)
+    np.testing.assert_allclose(float(low.time), t_dip, rtol=TMAX_RTOL)
+    np.testing.assert_allclose(float(low.value), reference[0], rtol=1e-12)
 
 
 def test_peak_of_an_infusion_and_of_a_bolus() -> None:
@@ -112,30 +181,18 @@ def test_two_compartment_peak_matches_root_of_textbook_derivative() -> None:
     )
 
 
-def test_coarse_grid_still_finds_the_peak() -> None:
-    """With grid_points=2 the grid is the window ends plus the event times only."""
-    k, ka, v, f, tlag = 0.1, 1.3, 20.0, 0.7, 0.75
-    model = pk.OneCompartment(k * v, v, ka=ka, f=f, tlag=tlag)
-    coarse = pk.cmax(model, [Dose(0.0, DOSE, Route.ORAL)], 0.0, 96.0, grid_points=2)
-    t_peak = math.log(ka / k) / (ka - k)
-    np.testing.assert_allclose(float(coarse.time), tlag + t_peak, rtol=TMAX_RTOL)
-    np.testing.assert_allclose(
-        float(coarse.value), f * DOSE / v * math.exp(-k * t_peak), rtol=CMAX_RTOL
-    )
+def test_turning_point_just_before_a_dose_at_the_window_end() -> None:
+    """At a dose at the window end the derivative's left limit is used.
 
-
-def test_turning_point_just_before_a_dose_that_sits_on_a_grid_point() -> None:
-    """At a dose time that coincides with a grid point the derivative's left limit is used.
-
-    With 10 grid points on [0, 9] the second dose (at 9 h, the window end) sits on a grid
-    point; the peak of the first dose lies just before it.
+    The second dose (at 9 h, the window end) starts absorption; the peak of the first
+    dose lies just before it.
     """
     k, ka, v = 0.1, 1.0, 20.0
     model = pk.OneCompartment(k * v, v, ka=ka)
     history = [Dose(6.0, DOSE, Route.ORAL), Dose(9.0, DOSE, Route.ORAL)]
     t_peak = math.log(ka / k) / (ka - k)
     assert 8.0 < 6.0 + t_peak < 9.0
-    peak = pk.cmax(model, history, 0.0, 9.0, grid_points=10)
+    peak = pk.cmax(model, history, 0.0, 9.0)
     np.testing.assert_allclose(float(peak.time), 6.0 + t_peak, rtol=TMAX_RTOL)
     np.testing.assert_allclose(float(peak.value), DOSE / v * math.exp(-k * t_peak), rtol=CMAX_RTOL)
 
@@ -183,15 +240,15 @@ def test_interior_minimum_matches_closed_form() -> None:
 
     model = pk.TwoCompartment(cl, v1, q, v2)
     assert 4.0 < t_star < 5.0
-    # With an infusion that ends at 5 h, just after the minimum, and grid_points=2 the
-    # only grid points in [0, 5] are 0 and 5 (also the infusion end): the minimum is
-    # found only if the left derivative at the infusion end is (correctly) positive.
-    for duration, grid_points in ((24.0, 1001), (5.0, 2), (5.0, 1001)):
+    # With an infusion that ends at 5 h, just after the minimum, the window [0, 5] has
+    # no event inside: the minimum is found only if the left derivative at the
+    # infusion end (the window end) is (correctly) positive.
+    for duration in (24.0, 5.0):
         history = [
             Dose(0.0, dose, Route.IV_BOLUS),
             Dose(0.0, rate * duration, Route.IV_INFUSION, duration),
         ]
-        low = pk.cmin(model, history, 0.0, 5.0, grid_points=grid_points)
+        low = pk.cmin(model, history, 0.0, 5.0)
         np.testing.assert_allclose(float(low.time), t_star, rtol=TMAX_RTOL)
         np.testing.assert_allclose(float(low.value), textbook(t_star), rtol=CMAX_RTOL)
 
@@ -228,6 +285,36 @@ def test_extrema_bound_the_reference_curve(p: Parameters, history: list[Dose]) -
     if start < t_peak < end and min(abs(t_peak - e) for e in [*events, start]) > 1e-6:
         right, _, size = concentration_slopes(p, history, [t_peak])
         assert abs(right[0]) <= 1e-6 * size[0] + tolerance
+
+
+@given(
+    p=parameters(two_compartment=True),
+    bolus_time=st.floats(0.05, 6.0),
+    bolus_amount=log_uniform(1e-3, 50.0),
+)
+def test_extrema_with_a_bolus_during_absorption(
+    p: Parameters, bolus_time: float, bolus_amount: float
+) -> None:
+    """Cmax/Cmin bound a dense sample of C even when two extrema follow one event.
+
+    Consistency check (the dense sample is pkcore's verified concentration) plus an
+    independent one: at an interior Tmax away from events the reference derivative
+    vanishes.
+    """
+    history = [Dose(0.0, 1000.0, Route.ORAL), Dose(bolus_time, bolus_amount, Route.IV_BOLUS)]
+    start, end = bolus_time, bolus_time + 2000.0
+    model = model_of(p)
+    t = np.concatenate([np.linspace(start, start + 50.0, 50001), np.linspace(start, end, 2001)])
+    c = pk.concentration(model, history, t)
+    tolerance = 1e-12 * float(np.max(c)) + 1e-300
+    peak, low = pk.cmax(model, history, start, end), pk.cmin(model, history, start, end)
+    assert float(peak.value) >= float(np.max(c)) - tolerance
+    assert float(low.value) <= float(np.min(c)) + tolerance
+    t_peak = float(peak.time)
+    events = [start, end, p.tlag]
+    if well_conditioned(p) and min(abs(t_peak - e) for e in events) > 1e-6:
+        derivatives = concentration_derivatives(p, history, [t_peak])
+        assert abs(derivatives["slope_right"][0]) <= 1e-6 * derivatives["slope_scale"][0]
 
 
 def test_terminal_rates_and_half_lives() -> None:

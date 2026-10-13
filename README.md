@@ -21,14 +21,18 @@ Version 0.1 provides:
   out).
 - Closed-form superposition (no ODE solver), numerically stable also when the absorption rate
   equals or nearly equals a disposition rate, vectorised over time points and parameter draws.
-- Exact AUC over any interval (including AUC to infinity) and summary metrics on simulated
-  curves: Cmax/Tmax, Cmin over an explicitly defined interval, the pre-dose trough, the
-  terminal half-life and the apparent terminal rate after oral doses.
+- AUC over any interval (including AUC to infinity) by analytic integration, exact up to
+  rounding, and summary metrics on simulated curves: Cmax/Tmax and Cmin over an explicitly
+  defined interval (every critical point between events is bracketed, so no extremum is missed
+  for lack of sampling), the pre-dose trough, the terminal half-life and the apparent terminal
+  rate after oral doses.
 - Percentile bands over parameter draws that the caller supplies.
 
 Units are canonical and never converted: amounts in mg, volumes in L, times in h, clearances
 in L/h, rate constants in 1/h, concentrations in mg/L. Not in v0.1: three-compartment models,
-steady-state (SS) dose records, unit conversion, nonlinear elimination.
+steady-state (SS) dose records, unit conversion, nonlinear elimination. Known limitation of
+the metrics: two extrema closer together than floating-point rounding can resolve are not
+separated (the error in Cmax or Cmin is then itself at rounding level).
 
 The conventions (what happens exactly at a dose time, where F and the lag time apply, how
 other engines may differ) and the numerical methods are documented in
@@ -50,7 +54,7 @@ doses.append(pk.Dose(time=80.0, amount=200.0, route=pk.Route.IV_INFUSION, durati
 times = np.linspace(0.0, 96.0, 193)  # h
 concentration = pk.concentration(model, doses, times)  # mg/L, shape (193,)
 
-auc = pk.auc(model, doses, 60.0, 72.0)  # mg*h/L, exact
+auc = pk.auc(model, doses, 60.0, 72.0)  # mg*h/L, analytic
 peak = pk.cmax(model, doses, 60.0, 72.0)  # Cmax (peak.value) and Tmax (peak.time)
 pre_dose = pk.trough(model, doses, 60.0)  # left limit just before the 60 h dose
 print(f"AUC 60-72 h: {auc:.3f} mg*h/L; Cmax {peak.value:.3f} mg/L at {peak.time:.2f} h")
@@ -65,11 +69,11 @@ bands = pk.percentile_bands(draws, doses, times, percentiles=(5, 50, 95))  # sha
 
 ## Verification, not validation
 
-The test suite **verifies** that the code reproduces the mathematics: analytic identities
-(for example AUC0-inf = F·D/CL, mass balance, linearity, time-shift invariance), independent
-numerical ODE integration and matrix-exponential solutions, and the textbook formulas evaluated
-in high-precision decimal arithmetic. Documented cross-checks against established open-source
-PK engines are planned. Passing these tests says nothing about whether any particular drug
+The test suite **verifies** that the code reproduces the mathematics: independent numerical
+ODE integration and matrix-exponential solutions, the textbook formulas evaluated in
+high-precision decimal arithmetic, analytic identities (for example AUC0-inf = F·D/CL and mass
+balance) and consistency checks (linearity, superposition, time-shift invariance).
+Documented cross-checks against established open-source PK engines are planned. Passing these tests says nothing about whether any particular drug
 model describes any particular person; that is model **validation**, which needs external
 clinical data and is outside this library.
 

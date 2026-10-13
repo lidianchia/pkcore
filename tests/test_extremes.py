@@ -86,32 +86,40 @@ def test_negligible_absorption() -> None:
     assert float(pk.apparent_oral_terminal_rate(slow)) == ka  # flip-flop
 
 
+def one_compartment_bolus_and_infusion(cl: float, v: float, t: np.ndarray) -> np.ndarray:
+    """Textbook one-compartment curve: bolus DOSE at 0, infusion of DOSE over [3, 5] h."""
+    k = cl / v
+    bolus = DOSE / v * np.exp(-k * t)
+    rate, start, duration = DOSE / 2.0, 3.0, 2.0
+    running = np.clip(t - start, 0.0, duration)
+    after = np.maximum(t - start - duration, 0.0)
+    infusion = rate / cl * -np.expm1(-k * running) * np.exp(-k * after)
+    return bolus + infusion
+
+
 def test_two_compartments_with_negligible_distribution() -> None:
-    q = 1e-9
-    two = pk.TwoCompartment(2.0, 15.0, q, 40.0)
-    one = pk.OneCompartment(2.0, 15.0)
+    q, cl, v1 = 1e-9, 2.0, 15.0
+    two = pk.TwoCompartment(cl, v1, q, 40.0)
     history = [Dose(0.0, DOSE, Route.IV_BOLUS), Dose(3.0, DOSE, Route.IV_INFUSION, duration=2.0)]
     t = T[T <= 100.0]
     np.testing.assert_allclose(
         pk.concentration(two, history, t),
-        pk.concentration(one, history, t),
-        rtol=q / 15.0 * 100.0 * 2,  # neglects k12 t
+        one_compartment_bolus_and_infusion(cl, v1, t),
+        rtol=q / v1 * 100.0 * 2,  # neglects k12 t
     )
-    assert np.all(pk.amounts(two, history, t).peripheral <= DOSE * 2 * q / 15.0 * 100.0)
+    assert np.all(pk.amounts(two, history, t).peripheral <= DOSE * 2 * q / v1 * 100.0)
 
 
 def test_two_compartments_with_instantaneous_distribution() -> None:
-    q, v1, v2 = 1e9, 15.0, 40.0
-    two = pk.TwoCompartment(2.0, v1, q, v2)
-    one = pk.OneCompartment(2.0, v1 + v2)
-    history = [Dose(0.0, DOSE, Route.IV_BOLUS)]
+    q, cl, v1, v2 = 1e9, 2.0, 15.0, 40.0
+    two = pk.TwoCompartment(cl, v1, q, v2)
     t = np.array([1e-3, 0.5, 1.0, 10.0, 100.0])
     np.testing.assert_allclose(
-        pk.concentration(two, history, t),
-        pk.concentration(one, history, t),
+        pk.concentration(two, [Dose(0.0, DOSE, Route.IV_BOLUS)], t),
+        DOSE / (v1 + v2) * np.exp(-cl / (v1 + v2) * t),
         rtol=1e-7,  # neglects terms of order cl / q and exp(-q t / v)
     )
-    np.testing.assert_allclose(float(pk.terminal_rate(two)), 2.0 / (v1 + v2), rtol=1e-7)
+    np.testing.assert_allclose(float(pk.terminal_rate(two)), cl / (v1 + v2), rtol=1e-7)
 
 
 def test_very_late_times_underflow_to_zero() -> None:

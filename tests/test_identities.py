@@ -1,14 +1,23 @@
 """Analytic identities that any correct linear PK engine must satisfy.
 
-Expected values are mathematical identities (single-dose AUC0-inf = F*D/CL, the
-geometric-series accumulation ratio, mass balance, linearity, superposition and
-time-shift invariance), never values produced by pkcore itself. Tolerances are a few
-hundred units in the last place at most: these identities hold up to rounding.
+Two kinds of tests:
+
+* Independent expected values: single-dose AUC0-inf = F*D/CL, the geometric-series
+  accumulation ratio, the steady-state AUC over one interval, mass balance against
+  the administered amount, and short-interval AUCs against decimal arithmetic.
+* Consistency checks that relate pkcore results to each other: linearity in dose,
+  superposition, time-shift invariance and AUC additivity. They cannot detect an
+  error that respects the identity (for example a wrong overall scale), which the
+  reference comparisons in the other modules cover.
+
+Tolerances are a few hundred units in the last place at most: these identities hold
+up to rounding.
 """
 
 import math
 
 import numpy as np
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -24,7 +33,7 @@ from pk_strategies import (
     times_in,
 )
 from pkcore import Dose, Route
-from reference import Parameters
+from reference import Parameters, decimal_one_compartment_auc
 
 
 def bioavailable(p: Parameters, dose: Dose) -> float:
@@ -200,3 +209,28 @@ def test_auc_over_a_steady_state_interval_equals_single_dose_auc() -> None:
             value = float(pk.auc(model, history, start, start + interval))
             expected = bioavailable(p, history[0]) / p.cl
             np.testing.assert_allclose(value, expected, rtol=1e-12)
+
+
+@pytest.mark.parametrize("route", list(Route))
+@pytest.mark.parametrize("dose_time", [0.1, -6.3, -1000.3])
+@pytest.mark.parametrize(
+    ("start", "width"), [(12.0, 1e-6), (12.0, 1e-9), (100.0, 1e-6), (5.0, 0.01)]
+)
+def test_auc_over_short_intervals_far_from_the_dose(
+    route: Route, dose_time: float, start: float, width: float
+) -> None:
+    """Short intervals keep full relative accuracy, even long after the dose.
+
+    Regression: the width was computed as (end - dose) - (start - dose), which loses
+    the digits of the width when the interval is far from the dose. The infusion runs
+    for 2000 h, so the intervals fall during it or after it. Expected value: the
+    textbook antiderivative in decimal arithmetic. Tolerance: the condition number of
+    exp(-k t) at k t ~ 100.
+    """
+    p = Parameters(cl=2.0, v1=20.0, ka=1.3)
+    duration = 2000.0 if dose_time < 0 else 3.0
+    dose = Dose(dose_time, 100.0, route, duration if route is Route.IV_INFUSION else None)
+    end = start + width
+    value = float(pk.auc(model_of(p), [dose], start, end))
+    expected = decimal_one_compartment_auc(p, dose, start, end)
+    np.testing.assert_allclose(value, expected, rtol=1e-13)

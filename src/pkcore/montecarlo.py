@@ -46,7 +46,10 @@ def percentile_bands(
     ``numpy.percentile(..., method="linear")``, so a band is not the curve of any
     single draw. A model with scalar parameters counts as one draw.
     """
-    levels = np.array(percentiles, dtype=np.float64)
+    raw = np.asarray(percentiles)
+    if raw.dtype.kind not in "iuf":
+        raise TypeError(f"percentiles must be real numbers, got dtype {raw.dtype}")
+    levels = raw.astype(np.float64, copy=True)
     if levels.ndim != 1 or levels.size == 0:
         raise ValueError("percentiles must be a non-empty 1-D sequence")
     if not np.all(np.isfinite(levels) & (levels >= 0.0) & (levels <= 100.0)):

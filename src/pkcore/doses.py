@@ -4,6 +4,7 @@ A dosing history is any iterable of :class:`Dose` objects: times may be irregula
 unsorted and negative, and infusions may overlap. A missed dose is simply left out.
 """
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -53,7 +54,7 @@ class Dose:
             raise ValueError(f"route must be one of {choices}; got {route!r}") from None
         checked_time = _validation.real_number("Dose.time", time)
         checked_amount = _validation.real_number("Dose.amount", amount)
-        if checked_amount < 0.0:
+        if checked_amount < 0.0 or math.copysign(1.0, checked_amount) < 0.0:
             raise ValueError(f"Dose.amount must be >= 0, got {checked_amount!r}")
         checked_duration: float | None = None
         if checked_route is Route.IV_INFUSION:

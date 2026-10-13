@@ -1,10 +1,10 @@
 """One-sided derivatives of C at event times (used by Cmax/Cmin).
 
-The metrics decide where extrema lie from the signs of the left and right derivatives
-at grid points, including event times where the derivative jumps. These tests check
-those one-sided derivatives directly, at event times that are not exactly
-representable (``0.7 + 0.1``), against closed forms and against the right-hand side of
-the ODE evaluated on exact matrix-exponential states.
+The metrics decide where extrema lie from the signs of the left and right values of
+``C'`` and of the reduced derivative ``C'' + lambda1 C'`` at window ends and event
+times, where both jump. These tests check them directly, at event times that are not
+exactly representable (``0.7 + 0.1``), against closed forms and against the ODE
+right-hand side evaluated on exact matrix-exponential states.
 """
 
 import math
@@ -12,11 +12,17 @@ import math
 import numpy as np
 import pytest
 from hypothesis import assume, given
+from hypothesis import strategies as st
 
 from pk_strategies import doses, model_of, parameters
 from pkcore import Dose, OneCompartment, Route
-from pkcore._engine import Side, central_slope, prepare
-from reference import Parameters, concentration_slopes, well_conditioned
+from pkcore._engine import Side, central_bend, central_slope, prepare
+from reference import (
+    Parameters,
+    concentration_derivatives,
+    concentration_slopes,
+    well_conditioned,
+)
 
 CL, V, KA, F, TLAG = 2.0, 20.0, 1.3, 0.7, 0.1
 K = CL / V
@@ -78,3 +84,34 @@ def test_one_sided_slopes_at_every_event_match_the_ode(p: Parameters, history: l
     atol = 1e-10 * float(np.max(scale))
     np.testing.assert_allclose(right, expected_right, rtol=0.0, atol=atol)
     np.testing.assert_allclose(left, expected_left, rtol=0.0, atol=atol)
+
+
+@given(p=parameters(), history=doses(), extra=st.lists(st.floats(0.0, 96.0), max_size=5))
+def test_reduced_second_derivative_matches_the_ode(
+    p: Parameters, history: list[Dose], extra: list[float]
+) -> None:
+    """``C'' + lambda1 C'`` on both sides of every event and at other times."""
+    assume(well_conditioned(p) and history)
+    events = {d.time for d in history} | set(extra)
+    events |= {d.time + p.tlag for d in history if d.route is Route.ORAL}
+    events |= {d.time + d.duration for d in history if d.duration is not None}
+    t = np.array(sorted(events))
+    kin, table = prepare(model_of(p), history)
+    with np.errstate(all="ignore"):
+        right = central_bend(kin, table, t.reshape(1, 1, -1), Side.RIGHT)[0] / p.v1
+        left = central_bend(kin, table, t.reshape(1, 1, -1), Side.LEFT)[0] / p.v1
+    expected = concentration_derivatives(p, history, t)
+    atol = 1e-10 * float(np.max(expected["bend_scale"]))
+    np.testing.assert_allclose(right, expected["bend_right"], rtol=0.0, atol=atol)
+    np.testing.assert_allclose(left, expected["bend_left"], rtol=0.0, atol=atol)
+
+
+def test_reduced_second_derivative_of_one_compartment() -> None:
+    """With one compartment it is ``-f D ka^2 exp(-ka tau)`` from oral doses only."""
+    history = [Dose(T0, DOSE, Route.ORAL), Dose(1.0, DOSE, Route.IV_BOLUS)]
+    kin, table = prepare(OneCompartment(CL, V, ka=KA, f=F, tlag=TLAG), history)
+    t = np.array([[[2.0, 5.0]]])
+    with np.errstate(all="ignore"):
+        bend = central_bend(kin, table, t, Side.RIGHT)[0]
+    tau = t[0, 0] - (T0 + TLAG)
+    np.testing.assert_allclose(bend, -F * DOSE * KA**2 * np.exp(-KA * tau), rtol=1e-14)

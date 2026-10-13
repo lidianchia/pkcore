@@ -3,7 +3,7 @@
 pkcore simulates one model (one drug) per call. It keeps no state between calls and
 has no function that combines the concentrations of different drugs, so simulating
 drug A gives bit-identical results whether or not drug B was simulated before, after
-or concurrently.
+or concurrently. These are consistency checks: they compare pkcore with itself.
 """
 
 from concurrent.futures import ThreadPoolExecutor

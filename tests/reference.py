@@ -273,48 +273,127 @@ def decimal_oral_peripheral_amount(p: Parameters, dose: float, t: float) -> floa
         return float(f * amount * ka * k12 * value)
 
 
-def decimal_oral_auc(p: Parameters, dose: float, t: float) -> float:
-    """Single oral dose at time 0, one compartment: AUC from 0 to ``t`` in decimal.
+def decimal_oral_auc(
+    p: Parameters, dose: float, t: float, *, start: float | None = None, dose_time: float = 0.0
+) -> float:
+    """Single oral dose, one compartment: AUC over ``[start, t]`` (default from the dose).
 
-    Integral of the Bateman function, or of Garrett's limit when ``ka == k``.
+    Integral of the Bateman function, or of Garrett's limit when ``ka == k``, as the
+    difference of its antiderivative at the two ends, in 80-digit decimal arithmetic.
     """
     with localcontext() as ctx:
-        ctx.prec = 60
+        ctx.prec = 80
         cl, v = Decimal(p.cl), Decimal(p.v1)
         ka, f, amount = Decimal(p.ka), Decimal(p.f), Decimal(dose)
-        tau = Decimal(t) - Decimal(p.tlag)
-        if tau <= 0:
-            return 0.0
         k = cl / v
-        if ka == k:
-            value = f * amount / (v * k) * (1 - (-k * tau).exp() * (1 + k * tau))
-        else:
+
+        def antiderivative(x: float) -> Decimal:
+            tau = Decimal(x) - Decimal(dose_time) - Decimal(p.tlag)
+            if tau <= 0:
+                return Decimal(0)
+            if ka == k:
+                return f * amount / (v * k) * (1 - (-k * tau).exp() * (1 + k * tau))
             one_minus = ((1 - (-k * tau).exp()) / k) - ((1 - (-ka * tau).exp()) / ka)
-            value = f * amount * ka / (v * (ka - k)) * one_minus
-        return float(value)
+            return f * amount * ka / (v * (ka - k)) * one_minus
+
+        lower = Decimal(0) if start is None else antiderivative(start)
+        return float(antiderivative(t) - lower)
+
+
+def concentration_derivatives(
+    p: Parameters, doses: Sequence[Dose], times: npt.ArrayLike
+) -> dict[str, FloatArray]:
+    """One-sided time derivatives of ``C`` from exact states and the ODE right-hand side.
+
+    The states come from :func:`expm_solution` (right values and left limits). Between
+    events ``dy/dt = A y + b`` and ``d2y/dt2 = A (A y + b)`` with the infusion rate in
+    ``b`` taken just after (right) or just before (left) each time. Returns the first
+    derivative (``"slope_right"``, ``"slope_left"``), ``C'' + lambda1 C'`` with
+    ``lambda1`` the smallest disposition eigenvalue from LAPACK (``"bend_right"``,
+    ``"bend_left"``), and, for tolerances, the sums of the magnitudes of the terms
+    (``"slope_scale"``, ``"bend_scale"``).
+    """
+    obs = np.asarray(times, dtype=float)
+    solution = expm_solution(p, doses, obs)
+    a = p.matrix()
+    if p.q > 0:
+        disposition = a[1:3, 1:3]
+        lam1 = float(np.min(-np.linalg.eigvals(disposition).real))
+    else:
+        lam1 = p.cl / p.v1
+    out = {
+        name: np.zeros(obs.shape)
+        for name in (
+            "slope_right",
+            "slope_left",
+            "bend_right",
+            "bend_left",
+            "slope_scale",
+            "bend_scale",
+        )
+    }
+    for i, t in enumerate(obs):
+        for side, states, rate in (
+            ("right", solution.right, infusion_rate(doses, float(t))),
+            ("left", solution.left, infusion_rate(doses, float(t), left=True)),
+        ):
+            y = np.array([states[name][i] for name in STATES])
+            b = np.zeros(len(STATES))
+            b[1] = rate
+            dy = a @ y + b
+            d2y = a @ dy
+            out[f"slope_{side}"][i] = dy[1] / p.v1
+            out[f"bend_{side}"][i] = (d2y[1] + lam1 * dy[1]) / p.v1
+            slope_terms = float(np.abs(a[1]) @ np.abs(y)) + rate
+            bend_terms = float(np.abs(a[1]) @ np.abs(dy)) + lam1 * abs(float(dy[1]))
+            out["slope_scale"][i] = max(out["slope_scale"][i], slope_terms / p.v1)
+            out["bend_scale"][i] = max(out["bend_scale"][i], bend_terms / p.v1)
+    return out
 
 
 def concentration_slopes(
     p: Parameters, doses: Sequence[Dose], times: npt.ArrayLike
 ) -> tuple[FloatArray, FloatArray, FloatArray]:
-    """One-sided derivatives ``dC/dt`` (right, left) from exact states and the ODE.
+    """One-sided ``dC/dt`` (right, left) and a scale; see :func:`concentration_derivatives`."""
+    d = concentration_derivatives(p, doses, times)
+    return d["slope_right"], d["slope_left"], d["slope_scale"]
 
-    The states come from :func:`expm_solution` (right values and left limits) and the
-    derivative from the right-hand side ``A y + b`` with the infusion rate active just
-    after (right) or just before (left) each time. Also returns, for tolerances, the sum
-    of the magnitudes of the terms of ``dC/dt``.
+
+def decimal_one_compartment_auc(p: Parameters, dose: Dose, start: float, end: float) -> float:
+    """AUC over ``[start, end]`` of one dose in the one-compartment model, in decimal.
+
+    The difference of the antiderivative of the textbook concentration (bolus, constant-
+    rate infusion, or Bateman function) at the two ends, in 80-digit arithmetic.
     """
-    obs = np.asarray(times, dtype=float)
-    solution = expm_solution(p, doses, obs)
-    a = p.matrix()
-    right, left, scale = np.zeros(obs.shape), np.zeros(obs.shape), np.zeros(obs.shape)
-    for i, t in enumerate(obs):
-        for states, rate, out in (
-            (solution.right, infusion_rate(doses, float(t)), right),
-            (solution.left, infusion_rate(doses, float(t), left=True), left),
-        ):
-            y = np.array([states[name][i] for name in STATES])
-            out[i] = (float(a[1] @ y) + rate) / p.v1
-            terms = float(np.abs(a[1]) @ np.abs(y)) + rate
-            scale[i] = max(scale[i], terms / p.v1)
-    return right, left, scale
+    with localcontext() as ctx:
+        ctx.prec = 80
+        cl, v = Decimal(p.cl), Decimal(p.v1)
+        k = cl / v
+        t0, amount = Decimal(dose.time), Decimal(dose.amount)
+
+        def exposure(x: float) -> Decimal:
+            """Integral of C from minus infinity to x."""
+            t = Decimal(x)
+            if dose.route is Route.IV_BOLUS:
+                tau = t - t0
+                return Decimal(0) if tau <= 0 else amount / cl * (1 - (-k * tau).exp())
+            if dose.route is Route.IV_INFUSION and dose.duration is not None:
+                duration = Decimal(dose.duration)
+                rate = amount / duration
+                tau = t - t0
+                if tau <= 0:
+                    return Decimal(0)
+                running = min(tau, duration)
+                during = rate / cl * (running - (1 - (-k * running).exp()) / k)
+                if tau <= duration:
+                    return during
+                at_end = rate / cl * (1 - (-k * duration).exp())
+                return during + at_end / k * (1 - (-k * (tau - duration)).exp())
+            ka, f = Decimal(p.ka), Decimal(p.f)
+            tau = t - t0 - Decimal(p.tlag)
+            if tau <= 0:
+                return Decimal(0)
+            one_minus = (1 - (-k * tau).exp()) / k - (1 - (-ka * tau).exp()) / ka
+            return f * amount * ka / (v * (ka - k)) * one_minus
+
+        return float(exposure(end) - exposure(start))
