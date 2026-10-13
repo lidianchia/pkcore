@@ -42,7 +42,11 @@ class Side(Enum):
 
 @dataclass(frozen=True, eq=False)
 class DoseTable:
-    """Dose records split by route into flat arrays."""
+    """Dose records split by route into flat arrays.
+
+    ``infusion_end`` is ``fl(time + duration)`` and ``infusion_duration`` the effective
+    duration ``infusion_end - infusion_time``, used for the rate and both phases.
+    """
 
     bolus_time: FloatArray
     bolus_amount: FloatArray
@@ -68,11 +72,15 @@ def prepare(model: Model, doses: Iterable[Dose]) -> tuple[Kinetics, DoseTable]:
         return np.array([getattr(d, attribute) for d in items if d.route is route], dtype=float)
 
     infusion_time = column(Route.IV_INFUSION, "time")
-    infusion_duration = column(Route.IV_INFUSION, "duration")
     with np.errstate(all="ignore"):
-        infusion_end = infusion_time + infusion_duration
+        infusion_end = infusion_time + column(Route.IV_INFUSION, "duration")
+        # The infusion runs from its time to the rounded end time; using the effective
+        # duration for the rate keeps the infused amount exact and C continuous.
+        infusion_duration = infusion_end - infusion_time
     if not np.isfinite(infusion_end).all():
         raise ValueError("an infusion end time (time + duration) is not finite")
+    if not np.all(infusion_duration > 0.0):
+        raise ValueError("an infusion duration is below the time resolution at its start time")
     table = DoseTable(
         bolus_time=column(Route.IV_BOLUS, "time"),
         bolus_amount=column(Route.IV_BOLUS, "amount"),

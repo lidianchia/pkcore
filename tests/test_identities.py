@@ -59,6 +59,26 @@ def test_single_dose_auc_to_infinity_is_bioavailable_dose_over_clearance(
     )
 
 
+@pytest.mark.parametrize(
+    ("cl", "start", "duration"), [(50.0, 40.0, 0.010030902289681624), (100.0, 1e4, 1e-3)]
+)
+def test_short_infusion_far_from_time_zero_delivers_the_whole_dose(
+    cl: float, start: float, duration: float
+) -> None:
+    """AUC0-inf = D / CL when start + duration is rounded.
+
+    Regression: the rate used the nominal duration but the infusion ran until the
+    rounded end time, so the infused amount was off by up to ulp(start) / duration.
+    """
+    model = pk.OneCompartment(cl, 1.0)
+    dose = Dose(start, 100.0, Route.IV_INFUSION, duration)
+    np.testing.assert_allclose(
+        float(pk.auc(model, [dose], start, math.inf)), 100.0 / cl, rtol=1e-14
+    )
+    amounts = pk.amounts(model, [dose], [start + 1e3])
+    np.testing.assert_allclose(amounts.central + amounts.eliminated, 100.0, rtol=1e-14)
+
+
 @given(
     p=parameters(),
     history=doses(),

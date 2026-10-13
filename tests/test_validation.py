@@ -187,12 +187,20 @@ def test_extremum_window_is_validated(metric: Callable[..., pk.Extremum]) -> Non
         (lambda: pk.OneCompartment(cl=1e300, v=1e-300), "cl / v must be a finite rate"),
         (lambda: pk.OneCompartment(cl=1e-300, v=1e300), "cl / v must be a finite rate"),
         (lambda: pk.TwoCompartment(1e300, 1e-10, 1.0, 1.0), "cl / v1 must be a finite rate"),
-        (lambda: pk.TwoCompartment(1.0, 1e-300, 1e300, 1.0), "q / v1 must be a finite rate"),
+        (lambda: pk.TwoCompartment(1e-300, 1e-300, 1e300, 1.0), "q / v1 must be a finite rate"),
         (lambda: pk.TwoCompartment(1.0, 1.0, 1e-300, 1e300), "q / v2 must be a finite rate"),
         (
             lambda: pk.TwoCompartment(1e-200, 1.0, 1e-200, 1e100),
             "slower disposition rate constant must be a finite rate",
         ),
+        # rate constants above 1e12 per hour are rejected
+        (lambda: pk.OneCompartment(cl=2e12, v=1.0), "cl / v must be a finite rate"),
+        (lambda: pk.OneCompartment(cl=1.0, v=1.0, ka=2e12), "ka must be a finite rate"),
+        (
+            lambda: pk.TwoCompartment(0.9e12, 1.0, 0.9e12, 1.0),
+            "faster disposition rate constant must be a finite rate",
+        ),
+        (lambda: pk.TwoCompartment(1.0, 1.0, 1.0, 1.0, ka=2e12), "ka must be a finite rate"),
     ],
 )
 def test_derived_rate_constants_must_be_representable(

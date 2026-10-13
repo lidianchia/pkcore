@@ -33,6 +33,9 @@ class OneCompartment:
             or ``None`` if the model is only used with IV doses.
         f: Bioavailability of oral doses, in [0, 1]. Not applied to IV doses.
         tlag: Absorption lag time (h) of oral doses, >= 0. Not applied to IV doses.
+
+    Rate constants (``ka`` and ``cl / v``) must lie between the smallest normal
+    floating-point number and ``1e12`` per hour.
     """
 
     cl: FloatArray
@@ -60,6 +63,8 @@ class OneCompartment:
         _initialise(self, values)
         with np.errstate(all="ignore"):
             _check_rate("cl / v", self.cl / self.v)
+            if self.ka is not None:
+                _check_rate("ka", self.ka)
 
     @property
     def n_draws(self) -> int | None:
@@ -87,6 +92,10 @@ class TwoCompartment:
         ka: First-order absorption rate constant (1/h), finite and > 0, or ``None``.
         f: Bioavailability of oral doses, in [0, 1]. Not applied to IV doses.
         tlag: Absorption lag time (h) of oral doses, >= 0. Not applied to IV doses.
+
+    Rate constants (``ka``, ``cl / v1``, ``q / v1``, ``q / v2`` and both disposition
+    eigenvalues) must lie between the smallest normal floating-point number and
+    ``1e12`` per hour.
     """
 
     cl: FloatArray
@@ -125,6 +134,8 @@ class TwoCompartment:
             slow, fast, _, _ = two_compartment_modes(self.cl, self.v1, self.q, self.v2)
             _check_rate("the slower disposition rate constant", slow)
             _check_rate("the faster disposition rate constant", fast)
+            if self.ka is not None:
+                _check_rate("ka", self.ka)
 
     @property
     def n_draws(self) -> int | None:
@@ -141,17 +152,23 @@ def _positive(name: str, value: npt.ArrayLike) -> FloatArray:
 
 
 _SMALLEST_RATE = float(np.finfo(np.float64).tiny)
+LARGEST_RATE = 1e12
+"""Largest accepted rate constant (per hour; a half-life of about 2.5 nanoseconds)."""
 
 
 def _check_rate(name: str, rate: FloatArray) -> None:
-    """Derived rate constants must be finite normal floating-point numbers."""
-    bad = ~(np.isfinite(rate) & (rate >= _SMALLEST_RATE))
+    """Rate constants must be finite, normal and at most ``LARGEST_RATE`` per hour.
+
+    The upper limit keeps the scales used by the extremum search (which grow with the
+    largest rate constant) meaningful; faster processes are instantaneous for any
+    pharmacokinetic purpose and should be modelled as such.
+    """
+    bad = ~(np.isfinite(rate) & (rate >= _SMALLEST_RATE) & (rate <= LARGEST_RATE))
     if bad.any():
         value = float(np.asarray(rate).reshape(-1)[np.flatnonzero(bad)[0]])
         raise ValueError(
-            f"{name} must be a finite rate constant >= {_SMALLEST_RATE:.3g} per hour, got "
-            f"{value!r}: the parameter values are too large or too small to be combined "
-            "in floating point"
+            f"{name} must be a finite rate constant between {_SMALLEST_RATE:.3g} and "
+            f"{LARGEST_RATE:g} per hour, got {value!r}"
         )
 
 

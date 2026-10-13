@@ -5,8 +5,12 @@ propagation and, for one compartment, the textbook closed forms in float64 with
 well-separated rate constants. Tolerances are explained in ``pk_strategies``.
 """
 
+import math
+
 import numpy as np
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 import pkcore as pk
 from pk_strategies import EXPM_ATOL, EXPM_RTOL, ODE_ATOL, ODE_RTOL, model_of
@@ -128,3 +132,42 @@ def test_vectorised_draws_match_scalar_simulations() -> None:
     for i, (cl, v1, v2) in enumerate([(1.0, 10.0, 20.0), (3.0, 15.0, 40.0), (8.0, 30.0, 80.0)]):
         scalar = pk.TwoCompartment(cl, v1, 5.0, v2, ka=0.9, f=0.8)
         np.testing.assert_allclose(c[i], pk.concentration(scalar, history, TIMES), rtol=1e-15)
+
+
+def neighbours(t: float, count: int) -> list[float]:
+    """``t`` and its ``count`` floating-point neighbours on each side."""
+    before, after, points = t, t, [t]
+    for _ in range(count):
+        before, after = math.nextafter(before, -math.inf), math.nextafter(after, math.inf)
+        points += [before, after]
+    return sorted(points)
+
+
+@given(
+    start=st.floats(0.0, 1e4),
+    duration=st.floats(1e-4, 10.0),
+    cl=st.floats(0.1, 50.0),
+    v=st.floats(1.0, 100.0),
+)
+def test_concentration_is_continuous_at_a_rounded_infusion_end(
+    start: float, duration: float, cl: float, v: float
+) -> None:
+    """A lone infusion rises until its (rounded) end and decays after it.
+
+    Regression: with the rate taken from the nominal duration, C jumped up by about
+    ulp(t) / (2 duration) relative just after a rounded-down end time.
+    """
+    model = pk.OneCompartment(cl, v)
+    end = start + duration
+    times = neighbours(end, 3)
+    c = pk.concentration(model, [Dose(start, 100.0, Route.IV_INFUSION, duration)], times)
+    peak = c[3]  # at the end time itself
+    assert np.all(c <= peak * (1.0 + 8.0 * np.finfo(float).eps))
+
+
+def test_concentration_is_continuous_at_a_rounded_infusion_end_example() -> None:
+    model = pk.OneCompartment(2.0, 20.0)
+    start, duration = 22.16033944614529, 0.001465191634958011
+    times = neighbours(start + duration, 2)
+    c = pk.concentration(model, [Dose(start, 100.0, Route.IV_INFUSION, duration)], times)
+    assert np.all(c <= c[2] * (1.0 + 8.0 * np.finfo(float).eps))

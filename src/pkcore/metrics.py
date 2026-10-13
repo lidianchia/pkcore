@@ -107,8 +107,9 @@ def cmax(model: Model, doses: Iterable[Dose], start: float, end: float) -> Extre
     bisection, always bracketing). Derivative values below ``1e-280`` times the dose
     scale count as zero (near underflow their sign is unreliable).
 
-    Precision: root finding stops when the bracket is at most 8 units in the last
-    place of ``t`` wide. Tmax is then exact up to the band around the true Tmax in
+    Precision: root finding stops when the bracket is at most ``8 eps |t|`` wide (8 to
+    16 units in the last place of ``t``). Tmax is then exact up to the band around the
+    true Tmax in
     which rounding makes the sign of the computed ``C'`` unreliable, roughly
     ``eps * S / |C''(Tmax)|`` with ``S`` the sum of the magnitudes of the terms of
     ``C'`` (against closed forms, Tmax agreed to about 1e-15 relative).
@@ -210,9 +211,7 @@ def _extremum(
         )
         bends = (bend_right[:, :-1].ravel(), bend_left[:, 1:].ravel())
         piece_row, lo, hi, g_lo, g_hi = _split(search, intervals, bends)
-        # On each piece sign * C' has at most one zero: a change from + to <= 0 brackets a
-        # local maximum of sign * C.
-        turning = (g_lo > 0.0) & (g_hi <= 0.0) & (hi > lo)
+        turning = _turning(g_lo, g_hi, lo, hi)
         if turning.any():
             chosen = np.nonzero(turning)[0]
             critical_row = piece_row[chosen]
@@ -283,12 +282,16 @@ class _Search:
 def _grid(kin: Kinetics, table: DoseTable, ta: float, tb: float) -> tuple[FloatArray, BoolArray]:
     """Sorted per-row points ``ta``, ``tb`` and every event time in ``(ta, tb]``.
 
-    Other events are moved onto ``ta``, where duplicates are harmless; an event at
-    ``tb`` matters through its left limit. Left limits differ from right values only
-    at event times, so a point is marked if any entry with the same time is an event.
+    Rows with fewer events in the window are padded with ``ta``, where duplicates are
+    harmless; an event at ``tb`` matters through its left limit. Left limits differ
+    from right values only at event times, so a point is marked if any entry with the
+    same time is an event.
     """
     events = event_times(kin, table)
-    events = np.where((events > ta) & (events <= tb), events, ta)
+    inside = (events > ta) & (events <= tb)
+    keyed = np.sort(np.where(inside, events, np.inf), axis=1)
+    count = int(np.max(inside.sum(axis=1)))
+    events = np.where(np.isfinite(keyed[:, :count]), keyed[:, :count], ta)
     ends = np.broadcast_to(np.array([ta, tb]), (kin.rows, 2))
     combined = np.concatenate([ends, events], axis=1)
     order = np.argsort(combined, axis=1, kind="stable")
@@ -316,20 +319,32 @@ class _Intervals(NamedTuple):
     g_hi: FloatArray
 
 
+def _turning(g_lo: FloatArray, g_hi: FloatArray, lo: FloatArray, hi: FloatArray) -> BoolArray:
+    """Pieces whose ``sign * C'`` changes from ``> 0`` to ``<= 0``.
+
+    On each piece ``sign * C'`` has at most one zero, so such a piece brackets exactly
+    one local maximum of ``sign * C``. A value of exactly zero at the right end (for
+    example after underflow) still counts as a change.
+    """
+    return (g_lo > 0.0) & (g_hi <= 0.0) & (hi > lo)
+
+
 def _split(
     search: _Search, intervals: _Intervals, bends: tuple[FloatArray, FloatArray]
 ) -> _Intervals:
-    """Split every interval where the reduced derivative ``C'' + lambda1 C'`` changes sign.
+    """Split intervals where the reduced derivative ``C'' + lambda1 C'`` changes sign.
 
     ``bends`` holds the reduced derivative just inside both ends of each interval. On
-    the resulting pieces ``C'`` has at most one zero. A value that is zero (in practice
-    below the noise floor, near underflow) counts as a change of sign, so the split
-    then lands at the boundary of the region where the sign is known; extra splits are
-    harmless.
+    the resulting pieces ``C'`` has at most one zero. An interval whose ends have
+    strictly opposite signs of ``C'`` holds exactly one zero (it holds at most two) and
+    is not split. A value that is zero (in practice below the noise floor, near
+    underflow) counts as a change of sign, so the split then lands at the boundary of
+    the region where the sign is known; extra splits are harmless.
     """
     row, lo, hi, g_lo, g_hi = intervals
     bend_lo, bend_hi = bends
-    split = (bend_lo != 0.0) & (np.sign(bend_hi) != np.sign(bend_lo)) & (hi > lo)
+    one_zero = ((g_lo > 0.0) & (g_hi < 0.0)) | ((g_lo < 0.0) & (g_hi > 0.0))
+    split = (bend_lo != 0.0) & (np.sign(bend_hi) != np.sign(bend_lo)) & (hi > lo) & ~one_zero
     if not split.any():
         return intervals
     chosen = np.nonzero(split)[0]
@@ -387,7 +402,8 @@ def _refine(
     ``values`` holds it just inside both ends (``> 0`` at ``lo``, ``<= 0`` at ``hi``).
     Uses the Illinois variant of regula falsi with a bisection step every fourth
     iteration, so that each bracket at least halves every four steps, and stops
-    refining a bracket once it is at most 8 units in the last place of its ends wide.
+    refining a bracket once it is at most ``8 eps`` times its larger end (in magnitude)
+    wide, which is 8 to 16 units in the last place.
     """
     lo, hi = bracket[0].copy(), bracket[1].copy()
     g_lo, g_hi = values[0].copy(), values[1].copy()

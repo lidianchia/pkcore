@@ -41,9 +41,11 @@ Oral doses enter a depot that empties into the central compartment at the first-
 
 Parameters are validated on construction: all finite; `cl`, `v`, `v1`, `v2`, `q`, `ka` > 0;
 `f` in [0, 1]; `tlag` >= 0 (`ValueError` otherwise, `TypeError` for values that are not real
-numbers). The derived rate constants (`cl/v`, or `cl/v1`, `q/v1`, `q/v2` and both disposition
-eigenvalues) must be finite, normal floating-point numbers; otherwise construction fails with
-`ValueError` rather than overflowing or underflowing later. Each parameter is a scalar or a 1-D
+numbers). The rate constants (`ka` and `cl/v`, or `ka`, `cl/v1`, `q/v1`, `q/v2` and both
+disposition eigenvalues) must be normal floating-point numbers no larger than `1e12` per hour
+(a half-life of about 2.5 ns; faster processes are instantaneous for any pharmacokinetic
+purpose); otherwise construction fails with `ValueError` rather than overflowing or
+underflowing later. Each parameter is a scalar or a 1-D
 array of parameter draws; all arrays of one model must have the same length `n`. Results
 then have one row per draw: shape `(n,) + times.shape` instead of `times.shape`. Models,
 doses and parameter arrays are immutable.
@@ -75,12 +77,14 @@ caller filters them).
   exactly, not by evaluating at `t - epsilon`.
 - **Lag time.** An oral dose contributes from `t0 + tlag` on (nothing during the lag).
 - **Event times in floating point.** The time at which an oral dose enters the depot is the
-  floating-point number `t0 + tlag`, and an infusion ends at `t0 + duration`; every
-  comparison (is a time before or after the event?) uses exactly these numbers. For example
-  with `t0 = 0.7` and `tlag = 0.1` the input happens at `0.7999999999999999`. The rounding
-  shifts the phase after such an event by at most half a unit in the last place of `t`, which
-  changes `C` by at most about `lambda * ulp(t) / 2` relative (`lambda` the fastest rate
-  constant involved), far below other rounding errors.
+  floating-point number `t0 + tlag`, and an infusion ends at `t_end = t0 + duration` (rounded);
+  every comparison (is a time before or after the event?) uses exactly these numbers. For
+  example with `t0 = 0.7` and `tlag = 0.1` the input happens at `0.7999999999999999`. An
+  infusion runs at the rate `amount / (t_end - t0)`, so the full amount is infused and `C` is
+  continuous at `t_end`. Compared with exact arithmetic, the rounding (at most half a unit
+  in the last place of the event time) changes `C` by at most about
+  `ulp(t_end) / (2 duration)` relative during an infusion and `lambda * ulp(t) / 2` after an
+  event (`lambda` the fastest rate constant involved).
 - **Bioavailability.** `f` scales the oral amount. In v0.1 neither `f` nor `tlag` is applied
   to IV boluses or infusions.
 - **Steady state.** There are no steady-state (SS) dose records in v0.1. Simulate enough prior
@@ -138,7 +142,8 @@ bracketing). Derivative values below `1e-280` times the dose scale (total dose o
 times the largest rate constant per order of the derivative) are treated as zero, because so
 close to underflow their sign is unreliable; such a zero counts as a change of sign.
 
-Root finding stops when the bracket is at most 8 units in the last place of `t` wide. Tmax is
+Root finding stops when the bracket is at most `8 eps |t|` wide (8 to 16 units in the last
+place of `t`). Tmax is
 then exact up to the band around the true Tmax in which rounding makes the sign of the
 computed `C'` unreliable, roughly `eps * S / |C''(Tmax)|` with `S` the sum of the magnitudes
 of the terms of `C'` (against closed forms, Tmax agreed to about 1e-15 relative; the tests

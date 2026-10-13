@@ -132,15 +132,18 @@ def test_very_late_times_underflow_to_zero() -> None:
     np.testing.assert_allclose(float(pk.auc(model, history, 0.0, 1e8)), 3 * DOSE / 3.0, rtol=1e-13)
 
 
-extreme = log_uniform(1e-6, 1e6)
+# Clearances and volumes over 11 orders of magnitude each, keeping every rate constant
+# below the 1e12 per hour accepted by the models.
+clearance = log_uniform(1e-6, 1e5)
+volume = log_uniform(1e-5, 1e6)
 
 
 @st.composite
 def extreme_models(draw: st.DrawFn) -> pk.Model:
-    ka, f, tlag = draw(extreme), draw(st.floats(0.0, 1.0)), draw(times_in(0.0, 10.0))
+    ka, f, tlag = draw(log_uniform(1e-6, 1e6)), draw(st.floats(0.0, 1.0)), draw(times_in(0.0, 10.0))
     if draw(st.booleans()):
-        return pk.OneCompartment(draw(extreme), draw(extreme), ka=ka, f=f, tlag=tlag)
-    cl, v1, q, v2 = draw(extreme), draw(extreme), draw(extreme), draw(extreme)
+        return pk.OneCompartment(draw(clearance), draw(volume), ka=ka, f=f, tlag=tlag)
+    cl, v1, q, v2 = draw(clearance), draw(volume), draw(clearance), draw(volume)
     return pk.TwoCompartment(cl, v1, q, v2, ka=ka, f=f, tlag=tlag)
 
 

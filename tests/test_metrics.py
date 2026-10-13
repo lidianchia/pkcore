@@ -253,6 +253,46 @@ def test_interior_minimum_matches_closed_form() -> None:
         np.testing.assert_allclose(float(low.value), textbook(t_star), rtol=CMAX_RTOL)
 
 
+def test_left_limit_of_the_reduced_derivative_at_an_event() -> None:
+    """A dip and a peak between a bolus (window start) and an infusion end (window end).
+
+    The split between the two extrema is found only if the reduced derivative is taken
+    on the left of the infusion end. Expected values: roots of the reference derivative.
+    """
+    p = Parameters(cl=1.0, v1=5.0, q=50.0, v2=50.0, ka=0.5)
+    history = [
+        Dose(0.0, 1000.0, Route.ORAL),
+        Dose(3.5996, 0.26, Route.IV_BOLUS),
+        Dose(-1.0, 0.18 * 8.0, Route.IV_INFUSION, duration=8.0),
+    ]
+
+    def reference_slope(t: float) -> float:
+        return float(concentration_derivatives(p, history, [t])["slope_right"][0])
+
+    t_dip = brentq(reference_slope, 3.6, 5.0, xtol=1e-15)
+    t_peak = brentq(reference_slope, 5.0, 6.5, xtol=1e-15)
+    peak = pk.cmax(model_of(p), history, 3.5996, 7.0)
+    np.testing.assert_allclose(float(peak.time), t_peak, rtol=TMAX_RTOL)
+    reference = expm_solution(p, history, [t_dip, t_peak]).concentration
+    np.testing.assert_allclose(float(peak.value), reference[1], rtol=1e-12)
+    assert reference[0] < reference[1]
+
+
+def test_a_slope_of_exactly_zero_at_the_end_of_a_piece_counts_as_a_turn() -> None:
+    from pkcore.metrics import _refine, _turning  # noqa: PLC0415 (private helpers)
+
+    g_lo, g_hi = np.array([1.0, 1.0, -1.0]), np.array([0.0, -0.0, 0.0])
+    lo, hi = np.zeros(3), np.ones(3)
+    np.testing.assert_array_equal(_turning(g_lo, g_hi, lo, hi), [True, True, False])
+
+    # g is positive before 0.3 and exactly zero after it (as after an underflow).
+    def g(x: np.ndarray, _index: np.ndarray) -> np.ndarray:
+        return np.where(x < 0.3, 1.0, 0.0)
+
+    located = _refine(g, (np.array([0.0]), np.array([1.0])), (np.array([1.0]), np.array([0.0])))
+    np.testing.assert_allclose(located, 0.3, rtol=1e-14)
+
+
 @given(p=parameters(), history=doses(max_doses=5, horizon=36.0))
 def test_extrema_bound_the_reference_curve(p: Parameters, history: list[Dose]) -> None:
     """Cmax and Cmin bound the reference curve, are attained, and are stationary.
