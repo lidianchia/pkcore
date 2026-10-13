@@ -1,0 +1,53 @@
+{
+  "name": "one_missed_dose",
+  "description": "one-compartment: oral every 12 h with the 24 h dose missed (left out)",
+  "model": {
+    "compartments": 1,
+    "cl": 2.0,
+    "v": 20.0,
+    "ka": 1.3,
+    "f": 1.0,
+    "tlag": 0.0
+  },
+  "doses": [
+    {
+      "time": 0.0,
+      "amount": 100.0,
+      "route": "oral"
+    },
+    {
+      "time": 12.0,
+      "amount": 100.0,
+      "route": "oral"
+    },
+    {
+      "time": 36.0,
+      "amount": 100.0,
+      "route": "oral"
+    },
+    {
+      "time": 48.0,
+      "amount": 100.0,
+      "route": "oral"
+    }
+  ],
+  "observations": {
+    "times": [
+      0.0,
+      2.0,
+      6.0,
+      12.0,
+      14.0,
+      24.0,
+      26.0,
+      30.0,
+      36.0,
+      38.0,
+      48.0,
+      50.0,
+      60.0,
+      72.0
+    ],
+    "order": "dose_first"
+  }
+}
