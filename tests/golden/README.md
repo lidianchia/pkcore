@@ -73,6 +73,7 @@ docker run --rm -v "$PWD":/work -w /work \
   rates are also verified against decimal arithmetic in `tests/test_near_equal_rates.py`.
   The scenario records these as `known_engine_issues`, and the test checks that the
   deviation is still present, so the documentation stays true.
+  These outputs are excluded from the CI job's numeric drift check.
 - **`ka` near `k`.** The closed forms lose digits to cancellation: about 1e-9 relative for a
   relative gap of 1e-6.
 
